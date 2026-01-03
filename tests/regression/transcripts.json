@@ -1,0 +1,38 @@
+[
+  {
+    "id": "lang_pick_nl",
+    "lang": "en",
+    "input": "Nederlands.",
+    "expect": { "normalized_contains": ["Nederlands"] }
+  },
+  {
+    "id": "nl_order_butter_chicken_naan",
+    "lang": "nl",
+    "input": "Ik wil graag twee butter chicken en twee naan.",
+    "expect": { "normalized_contains": ["twee", "butter", "naan"] }
+  },
+  {
+    "id": "nl_rice_slip_reis_to_rijst",
+    "lang": "nl",
+    "input": "Ik wil reis erbij.",
+    "expect": { "normalized_contains": ["rijst"] }
+  },
+  {
+    "id": "nl_lamp_to_lamb",
+    "lang": "nl",
+    "input": "Biryani ook lamp Madras.",
+    "expect": { "normalized_contains": ["lamb"] }
+  },
+  {
+    "id": "nl_naam_gate_quantity",
+    "lang": "nl",
+    "input": "Twee naam graag.",
+    "expect": { "normalized_contains": ["naan"] }
+  },
+  {
+    "id": "nl_naam_gate_no_intent",
+    "lang": "nl",
+    "input": "Mijn naam is Marcel.",
+    "expect": { "normalized_not_contains": ["naan"] }
+  }
+]

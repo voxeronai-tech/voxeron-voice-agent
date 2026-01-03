@@ -1,0 +1,9 @@
+{
+  "upsell": {
+    "enable": true,
+    "never_suggest_if_in_cart": ["naan", "rijst"]
+  },
+  "category_aliases": {
+    "lamb": ["lam", "lams", "lamsgerecht", "lamsgerechten", "lamb"]
+  }
+}

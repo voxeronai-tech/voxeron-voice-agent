@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Voxeron Tenant Config",
+  "type": "object",
+  "required": ["tenant_name", "base_language", "supported_langs", "tts", "stt"],
+  "properties": {
+    "tenant_name": { "type": "string", "minLength": 1 },
+    "base_language": { "type": "string", "enum": ["en", "nl"] },
+    "supported_langs": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["en", "nl"] },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "tts": {
+      "type": "object",
+      "required": ["voices", "instructions"],
+      "properties": {
+        "voices": {
+          "type": "object",
+          "properties": {
+            "en": { "type": "string", "minLength": 1 },
+            "nl": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        },
+        "instructions": {
+          "type": "object",
+          "properties": {
+            "en": { "type": "string" },
+            "nl": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": true
+    },
+    "stt": {
+      "type": "object",
+      "required": ["prompt_base", "prompt_max_items"],
+      "properties": {
+        "prompt_base": { "type": "string" },
+        "prompt_max_items": { "type": "integer", "minimum": 0, "maximum": 200 }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
+

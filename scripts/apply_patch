@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+tmp="$(mktemp)"
+cat > "$tmp"
+
+if git apply -p0 "$tmp"; then
+  echo "Patch applied."
+else
+  echo "Patch failed. Retrying with --reject so you can inspect *.rej hunks..."
+  git apply -p0 --reject --whitespace=fix "$tmp" || true
+  echo "Inspect *.rej files + run: git status"
+  exit 1
+fi
+
+rm -f "$tmp"

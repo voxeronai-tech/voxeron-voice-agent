@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Voxeron Phonetics Rules",
+  "type": "object",
+  "required": ["patterns"],
+  "properties": {
+    "patterns": {
+      "type": "object",
+      "description": "Map language -> list of regex replacements",
+      "patternProperties": {
+        "^(\\*|en|nl)$": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["pattern", "replace"],
+            "properties": {
+              "pattern": { "type": "string", "minLength": 1 },
+              "replace": { "type": "string" },
+              "flags": {
+                "type": "array",
+                "items": { "type": "string", "enum": ["I", "M"] },
+                "uniqueItems": true
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "gates": {
+      "type": "object",
+      "properties": {
+        "naam_to_naan": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}
+

@@ -1,0 +1,14 @@
+{
+  "gates": {
+    "naam_to_naan": true
+  },
+  "patterns": {
+    "*": [
+      { "pattern": "\\bnederl[âa]ns\\b", "replace": "Nederlands", "flags": ["I"] }
+    ],
+    "nl": [
+      { "pattern": "\\breis\\b", "replace": "rijst", "flags": ["I"] },
+      { "pattern": "\\blamp\\b", "replace": "lamb", "flags": ["I"] }
+    ]
+  }
+}

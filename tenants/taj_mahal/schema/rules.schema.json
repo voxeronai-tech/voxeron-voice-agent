@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Voxeron Tenant Rules",
+  "type": "object",
+  "properties": {
+    "silence_end_ms": { "type": "integer", "minimum": 100, "maximum": 5000 },
+    "min_utterance_ms": { "type": "integer", "minimum": 200, "maximum": 5000 },
+    "upsell": {
+      "type": "object",
+      "properties": {
+        "enable": { "type": "boolean" },
+        "never_suggest_if_in_cart": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "category_aliases": {
+      "type": "object",
+      "description": "Optional: map category keys -> list of trigger words",
+      "additionalProperties": {
+        "type": "array",
+        "items": { "type": "string", "minLength": 1 },
+        "uniqueItems": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

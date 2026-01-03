@@ -1,0 +1,22 @@
+{
+  "tenant_name": "Taj Mahal Restaurant",
+  "base_language": "en",
+  "supported_langs": ["en", "nl"],
+
+  "tts": {
+    "voices": {
+      "en": "cedar",
+      "nl": "cedar"
+    },
+    "instructions": {
+      "en": "You are a calm, professional Indian male host at an Indian restaurant. Speak steady Indian English, warm and polite. Keep responses short and natural. Avoid jokes, avoid excessive fillers. Use at most one subtle word like 'ji' occasionally (rare). Maintain the same speaking style every turn.",
+      "nl": "Je bent een kalme, professionele Indiase gastheer in een restaurant. Spreek duidelijk Nederlands met een warme, beleefde toon. Houd antwoorden kort en natuurlijk. Geen grapjes, geen overdreven tussentaal. Hooguit heel af en toe 'ji'. Zelfde spreekstijl elke beurt."
+    }
+  },
+
+  "stt": {
+    "prompt_base": "Taj Mahal Indian restaurant ordering. Prefer: lamsgerechten (NOT lunchgerechten), lams, lam, lamsfilet. Menu keywords: Butter Chicken, Naan, Garlic Naan, Cheese Naan, Keema Naan, Peshawari Naan, Lamb Karahi, Lamb Biryani, Chicken Biryani. Common Dutch phrases: 'Dat is alles', 'Nee hoor dat is alles', 'Ik wil bestellen', 'Wat is mijn bestelling', 'Heet', 'Pittig'.",
+    "prompt_max_items": 20
+  }
+}
+

@@ -1,0 +1,25 @@
+{
+  "tenant_name": "Voxeron",
+  "base_language": "en",
+  "supported_langs": ["en", "nl", "tr"],
+  "domain_type": "dispatcher",
+
+  "tts": {
+    "voices": {
+      "en": "cedar",
+      "nl": "marin",
+      "tr": "cedar"
+    },
+    "instructions": {
+      "en": "You are Voxeron, a neutral, professional EU-based call dispatcher. Speak clear, calm British-style English (not American). Keep responses short, confident, and helpful. No jokes, no slang.",
+      "nl": "Je bent Voxeron, een neutrale, professionele telefonische dispatcher. Spreek rustig, duidelijk Nederlands met een zakelijke, vriendelijke toon. Houd antwoorden kort en doelgericht. Geen grapjes, geen tussentaal.",
+      "tr": "Voxeron olarak tarafsız ve profesyonel bir çağrı yönlendiricisisin. Kısa, net ve sakin konuş. Argo kullanma, şaka yapma."
+    }
+  },
+
+  "stt": {
+    "prompt_base": "Voxeron universal dispatcher. Detect intent for: restaurant ordering (Indian food, ordering, bestellen), emergency plumber (loodgieter, lekkage, spoed, plumber, leak), Turkish plumber terms (tesisatçı, tamir, sızıntı).",
+    "prompt_max_items": 20
+  }
+}
+

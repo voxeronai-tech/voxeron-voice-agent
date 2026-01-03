@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["patterns"],
+  "properties": {
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "naam_to_naan": { "type": "boolean" }
+      }
+    },
+    "patterns": {
+      "type": "object",
+      "patternProperties": {
+        "^(\\*|en|nl)$": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pattern", "replace"],
+            "properties": {
+              "pattern": { "type": "string", "minLength": 1 },
+              "replace": { "type": "string" },
+              "flags": {
+                "type": "array",
+                "items": { "type": "string", "enum": ["I", "M"] },
+                "uniqueItems": true
+              }
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "upsell": {
+    "enabled": true,
+    "avoid_if_already_in_order": ["naan", "rijst", "rice"]
+  },
+  "heartbeat": {
+    "idle_seconds": 25,
+    "en": "Take your time. What would you like to order next?",
+    "nl": "Neem je tijd - wat wil je hierna bestellen?"
+  }
+}

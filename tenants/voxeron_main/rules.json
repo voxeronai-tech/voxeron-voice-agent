@@ -1,0 +1,20 @@
+{
+  "upsell": {
+    "enabled": false,
+    "avoid_if_already_in_order": []
+  },
+  "heartbeat": {
+    "idle_seconds": 60,
+    "en": "Take your time. Which service do you need?",
+    "nl": "Neemt u gerust de tijd. Met welke dienst kan ik u helpen?",
+    "tr": "Acele etmeyin. Hangi hizmete ihtiyacınız var?"
+  },
+  "dispatcher": {
+    "greeting": {
+      "en": "Hi, this is Voxeron. Which service do you need?",
+      "nl": "Hoi, u spreekt met Voxeron. Met welke dienst kan ik u helpen?",
+      "tr": "Merhaba, Voxeron'a hoş geldiniz. Hangi hizmete ihtiyacınız var?"
+    }
+  }
+}
+

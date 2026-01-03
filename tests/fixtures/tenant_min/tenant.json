@@ -1,0 +1,16 @@
+{
+  "tenant_name": "Tenant Minimal Fixture",
+  "base_language": "en",
+  "supported_langs": ["en", "nl"],
+  "tts": {
+    "voices": { "en": "cedar", "nl": "marin" },
+    "instructions": {
+      "en": "Speak English naturally.",
+      "nl": "Spreek vloeiend Nederlands."
+    }
+  },
+  "stt": {
+    "prompt_base": "Restaurant demo vocabulary.",
+    "prompt_max_items": 8
+  }
+}

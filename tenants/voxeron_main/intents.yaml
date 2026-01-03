@@ -1,0 +1,91 @@
+# Voxeron Main Dispatcher - high-confidence keyword sieve
+# Goal: route to ABT (plumbing/emergency) or TAJ (restaurant ordering)
+# This includes "I want to order Indian food" (EN) and "ik wil Indiaas eten bestellen" (NL)
+
+dispatcher:
+  route_to_abt:
+    priority: 100
+    any:
+      tr:
+        - "tesisatçı"
+        - "tamir"
+        - "sızıntı"
+        - "su basması"
+        - "gaz kokusu"
+        - "gaz kaçağı"
+        - "boru"
+        - "musluk"
+        - "gider"
+        - "vana"
+      nl:
+        - "loodgieter"
+        - "lekkage"
+        - "spoed"
+        - "wateroverlast"
+        - "leiding"
+        - "leidingbreuk"
+        - "gaslucht"
+        - "gaslek"
+        - "verstopping"
+        - "riool"
+        - "afvoer"
+        - "water stroomt"
+      en:
+        - "plumber"
+        - "leak"
+        - "flood"
+        - "flooding"
+        - "burst pipe"
+        - "repair"
+        - "emergency"
+        - "gas smell"
+        - "gas leak"
+        - "blocked drain"
+        - "clogged"
+        - "no water"
+
+  route_to_taj:
+    priority: 90
+    any:
+      nl:
+        - "restaurant"
+        - "eten"
+        - "bestellen"
+        - "ik wil bestellen"
+        - "ik wil eten bestellen"
+        - "ik wil indiaas"
+        - "ik wil indiaas eten"
+        - "ik wil indiaas eten bestellen"
+        - "indiaas"
+        - "indiaas eten"
+        - "curry"
+        - "biryani"
+        - "naan"
+        - "taj"
+        - "taj mahal"
+      en:
+        - "restaurant"
+        - "food"
+        - "hungry"
+        - "order"
+        - "i want to order"
+        - "i want to order food"
+        - "i want to order indian food"
+        - "indian"
+        - "indian food"
+        - "curry"
+        - "biryani"
+        - "naan"
+        - "taj"
+        - "taj mahal"
+      tr:
+        - "yemek"
+        - "restoran"
+        - "sipariş"
+
+  unknown:
+    priority: 0
+    any:
+      "*":
+        - ""
+

@@ -1,0 +1,34 @@
+{
+  "gates": {
+    "naam_to_naan": false
+  },
+  "patterns": {
+    "*": [
+      { "pattern": "\\bplumer\\b", "replace": "plumber", "flags": ["I"] },
+      { "pattern": "\\bplumming\\b", "replace": "plumbing", "flags": ["I"] },
+      { "pattern": "\\bemergancy\\b", "replace": "emergency", "flags": ["I"] },
+
+      { "pattern": "\\bloodgietr\\b", "replace": "loodgieter", "flags": ["I"] },
+      { "pattern": "\\blekage\\b", "replace": "lekkage", "flags": ["I"] },
+      { "pattern": "\\bspoet\\b", "replace": "spoed", "flags": ["I"] },
+
+      { "pattern": "\\btesisatci\\b", "replace": "tesisatçı", "flags": ["I"] },
+      { "pattern": "\\bsizinti\\b", "replace": "sızıntı", "flags": ["I"] },
+      { "pattern": "\\bgaz\\s*koks?u\\b", "replace": "gaz kokusu", "flags": ["I"] }
+    ],
+    "nl": [
+      { "pattern": "\\bgaslucht\\b", "replace": "gaslucht", "flags": ["I"] },
+      { "pattern": "\\bwater\\s*overlast\\b", "replace": "wateroverlast", "flags": ["I"] },
+      { "pattern": "\\bleiding\\s*breuk\\b", "replace": "leidingbreuk", "flags": ["I"] }
+    ],
+    "en": [
+      { "pattern": "\\bburst\\s*pipe\\b", "replace": "burst pipe", "flags": ["I"] },
+      { "pattern": "\\bwater\\s*damage\\b", "replace": "water damage", "flags": ["I"] }
+    ],
+    "tr": [
+      { "pattern": "\\bsu\\s*basmas[iı]\\b", "replace": "su basması", "flags": ["I"] },
+      { "pattern": "\\bgaz\\s*kacag[iı]\\b", "replace": "gaz kaçağı", "flags": ["I"] }
+    ]
+  }
+}
+

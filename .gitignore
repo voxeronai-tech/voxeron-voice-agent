@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# Virtualenv
+venv/
+.venv/
+
+# Secrets / env
+.env
+.env.*
+set_env.sh
+
+# Logs & data
+logs/
+data/
+*.log
+
+# Archives / backups / scratch
+_archive/
+_backups/
+_backup_refactor/
+*.bak
+*.bck
+*.backup
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

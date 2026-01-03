@@ -1,0 +1,448 @@
+=== CPU ===
+Architecture:                            x86_64
+CPU op-mode(s):                          32-bit, 64-bit
+Address sizes:                           39 bits physical, 48 bits virtual
+Byte Order:                              Little Endian
+CPU(s):                                  16
+On-line CPU(s) list:                     0-15
+Vendor ID:                               GenuineIntel
+BIOS Vendor ID:                          Intel(R) Corporation
+Model name:                              11th Gen Intel(R) Core(TM) i7-11700 @ 2.50GHz
+BIOS Model name:                         11th Gen Intel(R) Core(TM) i7-11700 @ 2.50GHz To Be Filled By O.E.M. CPU @ 2.5GHz
+BIOS CPU family:                         198
+CPU family:                              6
+Model:                                   167
+Thread(s) per core:                      2
+Core(s) per socket:                      8
+Socket(s):                               1
+Stepping:                                1
+CPU(s) scaling MHz:                      76%
+CPU max MHz:                             4900.0000
+CPU min MHz:                             800.0000
+BogoMIPS:                                4992.00
+Flags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx pdpe1gb rdtscp lm constant_tsc art arch_perfmon pebs bts rep_good nopl xtopology nonstop_tsc cpuid aperfmperf tsc_known_freq pni pclmulqdq dtes64 monitor ds_cpl smx est tm2 ssse3 sdbg fma cx16 xtpr pdcm pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand lahf_lm abm 3dnowprefetch cpuid_fault epb ssbd ibrs ibpb stibp ibrs_enhanced fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid mpx avx512f avx512dq rdseed adx smap avx512ifma clflushopt intel_pt avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves dtherm ida arat pln pts hwp hwp_notify hwp_act_window hwp_epp hwp_pkg_req avx512vbmi umip pku ospke avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid fsrm md_clear flush_l1d arch_capabilities
+L1d cache:                               384 KiB (8 instances)
+L1i cache:                               256 KiB (8 instances)
+L2 cache:                                4 MiB (8 instances)
+L3 cache:                                16 MiB (1 instance)
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-15
+Vulnerability Gather data sampling:      Vulnerable
+Vulnerability Ghostwrite:                Not affected
+Vulnerability Indirect target selection: Mitigation; Aligned branch/return thunks
+Vulnerability Itlb multihit:             Not affected
+Vulnerability L1tf:                      Not affected
+Vulnerability Mds:                       Not affected
+Vulnerability Meltdown:                  Not affected
+Vulnerability Mmio stale data:           Mitigation; Clear CPU buffers; SMT vulnerable
+Vulnerability Reg file data sampling:    Not affected
+Vulnerability Retbleed:                  Mitigation; Enhanced IBRS
+Vulnerability Spec rstack overflow:      Not affected
+Vulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl
+Vulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:                Mitigation; Enhanced / Automatic IBRS; IBPB conditional; PBRSB-eIBRS SW sequence; BHI SW loop, KVM SW loop
+Vulnerability Srbds:                     Not affected
+Vulnerability Tsa:                       Not affected
+Vulnerability Tsx async abort:           Not affected
+Vulnerability Vmscape:                   Not affected
+
+=== GPU ===
+Fri Dec 26 08:57:52 2025       
++---------------------------------------------------------------------------------------+
+| NVIDIA-SMI 535.274.02             Driver Version: 535.274.02   CUDA Version: 12.2     |
+|-----------------------------------------+----------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |         Memory-Usage | GPU-Util  Compute M. |
+|                                         |                      |               MIG M. |
+|=========================================+======================+======================|
+|   0  NVIDIA GeForce GTX 1660 ...    Off | 00000000:01:00.0  On |                  N/A |
+| 42%   30C    P8              10W / 125W |    300MiB /  6144MiB |     17%      Default |
+|                                         |                      |                  N/A |
++-----------------------------------------+----------------------+----------------------+
+                                                                                         
++---------------------------------------------------------------------------------------+
+| Processes:                                                                            |
+|  GPU   GI   CI        PID   Type   Process name                            GPU Memory |
+|        ID   ID                                                             Usage      |
+|=======================================================================================|
+|    0   N/A  N/A      3147      G   /usr/lib/xorg/Xorg                          130MiB |
+|    0   N/A  N/A      3356      G   /usr/bin/gnome-shell                         55MiB |
+|    0   N/A  N/A      6843    C+G   ...cess-track-uuid=3190708988185955192      112MiB |
++---------------------------------------------------------------------------------------+
+
+=== RAM ===
+# dmidecode 3.5
+Getting SMBIOS data from sysfs.
+SMBIOS 3.3.0 present.
+
+Handle 0x0049, DMI type 16, 23 bytes
+Physical Memory Array
+	Location: System Board Or Motherboard
+	Use: System Memory
+	Error Correction Type: None
+	Maximum Capacity: 64 GB
+	Error Information Handle: Not Provided
+	Number Of Devices: 4
+
+Handle 0x004F, DMI type 17, 92 bytes
+Memory Device
+	Array Handle: 0x0049
+	Error Information Handle: Not Provided
+	Total Width: Unknown
+	Data Width: Unknown
+	Size: No Module Installed
+	Form Factor: Unknown
+	Set: None
+	Locator: Controller0-ChannelA-DIMM0
+	Bank Locator: BANK 0
+	Type: Unknown
+	Type Detail: None
+
+Handle 0x0050, DMI type 17, 92 bytes
+Memory Device
+	Array Handle: 0x0049
+	Error Information Handle: Not Provided
+	Total Width: 64 bits
+	Data Width: 64 bits
+	Size: 8 GB
+	Form Factor: DIMM
+	Set: None
+	Locator: Controller0-ChannelA-DIMM1
+	Bank Locator: BANK 0
+	Type: DDR4
+	Type Detail: Synchronous
+	Speed: 2667 MT/s
+	Manufacturer: Kingston
+	Serial Number: 7766204A
+	Asset Tag: 9876543210
+	Part Number: KHX2666C16/8G       
+	Rank: 1
+	Configured Memory Speed: 3066 MT/s
+	Minimum Voltage: 1.2 V
+	Maximum Voltage: 1.2 V
+	Configured Voltage: 1.2 V
+	Memory Technology: DRAM
+	Memory Operating Mode Capability: Volatile memory
+	Firmware Version: Not Specified
+	Module Manufacturer ID: Bank 2, Hex 0x98
+	Module Product ID: Unknown
+	Memory Subsystem Controller Manufacturer ID: Unknown
+	Memory Subsystem Controller Product ID: Unknown
+	Non-Volatile Size: None
+	Volatile Size: 8 GB
+	Cache Size: None
+	Logical Size: None
+
+Handle 0x0051, DMI type 17, 92 bytes
+Memory Device
+	Array Handle: 0x0049
+	Error Information Handle: Not Provided
+	Total Width: Unknown
+	Data Width: Unknown
+	Size: No Module Installed
+	Form Factor: Unknown
+	Set: None
+	Locator: Controller0-ChannelB-DIMM0
+	Bank Locator: BANK 1
+	Type: Unknown
+	Type Detail: None
+
+Handle 0x0052, DMI type 17, 92 bytes
+Memory Device
+	Array Handle: 0x0049
+	Error Information Handle: Not Provided
+	Total Width: 64 bits
+	Data Width: 64 bits
+	Size: 8 GB
+	Form Factor: DIMM
+	Set: None
+	Locator: Controller0-ChannelB-DIMM1
+	Bank Locator: BANK 1
+	Type: DDR4
+	Type Detail: Synchronous
+	Speed: 2667 MT/s
+	Manufacturer: Kingston
+	Serial Number: 04262418
+	Asset Tag: 9876543210
+	Part Number: KHX2666C16/8G       
+	Rank: 1
+	Configured Memory Speed: 3066 MT/s
+	Minimum Voltage: 1.2 V
+	Maximum Voltage: 1.2 V
+	Configured Voltage: 1.2 V
+	Memory Technology: DRAM
+	Memory Operating Mode Capability: Volatile memory
+	Firmware Version: Not Specified
+	Module Manufacturer ID: Bank 2, Hex 0x98
+	Module Product ID: Unknown
+	Memory Subsystem Controller Manufacturer ID: Unknown
+	Memory Subsystem Controller Product ID: Unknown
+	Non-Volatile Size: None
+	Volatile Size: 8 GB
+	Cache Size: None
+	Logical Size: None
+
+
+=== STORAGE ===
+NAME          SIZE TYPE MOUNTPOINT
+loop0           4K loop /snap/bare/5
+loop1        63.8M loop /snap/core20/2686
+loop2          74M loop /snap/core22/2163
+loop3       332.1M loop /snap/code/217
+loop4        66.8M loop /snap/core24/1237
+loop5          74M loop /snap/core22/2193
+loop6       250.4M loop /snap/firefox/7477
+loop7       250.8M loop /snap/firefox/7559
+loop8        11.1M loop /snap/firmware-updater/167
+loop9        18.5M loop /snap/firmware-updater/210
+loop10        516M loop /snap/gnome-42-2204/202
+loop11      669.8M loop /snap/gnome-46-2404/145
+loop12       91.7M loop /snap/gtk-common-themes/1535
+loop13        1.2G loop /snap/libreoffice/365
+loop14        395M loop /snap/mesa-2404/1165
+loop15       10.8M loop /snap/snap-store/1270
+loop16       49.3M loop /snap/snapd/24792
+loop17       50.9M loop /snap/snapd/25577
+loop18        576K loop /snap/snapd-desktop-integration/315
+sda         223.6G disk 
+├─sda1        100M part 
+├─sda2         16M part 
+├─sda3        223G part 
+└─sda4        509M part 
+sdb           1.8T disk 
+└─sdb1        1.8T part 
+zram0         7.7G disk [SWAP]
+nvme0n1     931.5G disk 
+├─nvme0n1p1    16M part 
+├─nvme0n1p2     1G part /boot/efi
+└─nvme0n1p3 930.4G part /
+
+=== NVME ===
+
+=== MOEDERBORD ===
+# dmidecode 3.5
+Getting SMBIOS data from sysfs.
+SMBIOS 3.3.0 present.
+
+Handle 0x0002, DMI type 2, 15 bytes
+Base Board Information
+	Manufacturer: ASUSTeK COMPUTER INC.
+	Product Name: ROG STRIX Z590-E GAMING WIFI
+	Version: Rev 1.xx
+	Serial Number: 210382060201139
+	Asset Tag: Default string
+	Features:
+		Board is a hosting board
+		Board is replaceable
+	Location In Chassis: Default string
+	Chassis Handle: 0x0003
+	Type: Motherboard
+	Contained Object Handles: 0
+
+Handle 0x002E, DMI type 10, 6 bytes
+On Board Device Information
+	Type: Video
+	Status: Enabled
+	Description:    To Be Filled By O.E.M.
+
+Handle 0x0060, DMI type 41, 11 bytes
+Onboard Device
+	Reference Designation: Onboard - Other
+	Type: Other
+	Status: Enabled
+	Type Instance: 1
+	Bus Address: 0000:00:00.0
+
+Handle 0x0061, DMI type 41, 11 bytes
+Onboard Device
+	Reference Designation: Onboard - Other
+	Type: Other
+	Status: Enabled
+	Type Instance: 2
+	Bus Address: 0000:00:14.0
+
+Handle 0x0062, DMI type 41, 11 bytes
+Onboard Device
+	Reference Designation: Onboard - Other
+	Type: Other
+	Status: Enabled
+	Type Instance: 3
+	Bus Address: 0000:00:14.2
+
+Handle 0x0063, DMI type 41, 11 bytes
+Onboard Device
+	Reference Designation: Onboard - Other
+	Type: Other
+	Status: Enabled
+	Type Instance: 4
+	Bus Address: 0000:00:15.0
+
+Handle 0x0064, DMI type 41, 11 bytes
+Onboard Device
+	Reference Designation: Onboard - Other
+	Type: Other
+	Status: Enabled
+	Type Instance: 5
+	Bus Address: 0000:00:15.1
+
+Handle 0x0065, DMI type 41, 11 bytes
+Onboard Device
+	Reference Designation: Onboard - Other
+	Type: Other
+	Status: Enabled
+	Type Instance: 6
+	Bus Address: 0000:00:16.0
+
+Handle 0x0066, DMI type 41, 11 bytes
+Onboard Device
+	Reference Designation: Onboard - SATA
+	Type: SATA Controller
+	Status: Enabled
+	Type Instance: 1
+	Bus Address: 0000:00:17.0
+
+Handle 0x0067, DMI type 41, 11 bytes
+Onboard Device
+	Reference Designation: Onboard - Other
+	Type: Other
+	Status: Enabled
+	Type Instance: 7
+	Bus Address: 0000:00:1f.0
+
+Handle 0x0068, DMI type 41, 11 bytes
+Onboard Device
+	Reference Designation: Onboard - Sound
+	Type: Sound
+	Status: Enabled
+	Type Instance: 1
+	Bus Address: 0000:00:1f.3
+
+Handle 0x0069, DMI type 41, 11 bytes
+Onboard Device
+	Reference Designation: Onboard - Other
+	Type: Other
+	Status: Enabled
+	Type Instance: 8
+	Bus Address: 0000:00:1f.4
+
+Handle 0x006A, DMI type 41, 11 bytes
+Onboard Device
+	Reference Designation: Onboard - Other
+	Type: Other
+	Status: Enabled
+	Type Instance: 9
+	Bus Address: 0000:00:1f.5
+
+
+=== CHASSIS ===
+# dmidecode 3.5
+Getting SMBIOS data from sysfs.
+SMBIOS 3.3.0 present.
+
+Handle 0x0003, DMI type 3, 22 bytes
+Chassis Information
+	Manufacturer: Default string
+	Type: Desktop
+	Lock: Not Present
+	Version: Default string
+	Serial Number: Default string
+	Asset Tag: Default string
+	Boot-up State: Safe
+	Power Supply State: Safe
+	Thermal State: Safe
+	Security Status: None
+	OEM Information: 0x00000000
+	Height: Unspecified
+	Number Of Power Cords: 1
+	Contained Elements: 0
+	SKU Number: Default string
+
+
+=== SYSTEM SUMMARY ===
+H/W path         Device          Class          Description
+===========================================================
+                                 system         System Product Name (SKU)
+/0                               bus            ROG STRIX Z590-E GAMING WIFI
+/0/0                             memory         64KiB BIOS
+/0/49                            memory         16GiB System Memory
+/0/49/0                          memory         [empty]
+/0/49/1                          memory         8GiB DIMM DDR4 Synchronous 2667 MHz (0.4 ns)
+/0/49/2                          memory         [empty]
+/0/49/3                          memory         8GiB DIMM DDR4 Synchronous 2667 MHz (0.4 ns)
+/0/5a                            memory         384KiB L1 cache
+/0/5b                            memory         256KiB L1 cache
+/0/5c                            memory         4MiB L2 cache
+/0/5d                            memory         16MiB L3 cache
+/0/5e                            processor      11th Gen Intel(R) Core(TM) i7-11700 @ 2.50GHz
+/0/100                           bridge         Intel Corporation
+/0/100/1                         bridge         Intel Corporation
+/0/100/1/0       /dev/fb0        display        TU116 [GeForce GTX 1660 SUPER]
+/0/100/1/0.1     card2           multimedia     TU116 High Definition Audio Controller
+/0/100/1/0.1/0   input12         input          HDA NVidia HDMI/DP,pcm=3
+/0/100/1/0.1/1   input13         input          HDA NVidia HDMI/DP,pcm=7
+/0/100/1/0.1/2   input14         input          HDA NVidia HDMI/DP,pcm=8
+/0/100/1/0.1/3   input15         input          HDA NVidia HDMI/DP,pcm=9
+/0/100/1/0.2                     bus            TU116 USB 3.1 Host Controller
+/0/100/1/0.2/0   usb3            bus            xHCI Host Controller
+/0/100/1/0.2/1   usb4            bus            xHCI Host Controller
+/0/100/1/0.3                     bus            TU116 USB Type-C UCSI Controller
+/0/100/6                         bridge         Intel Corporation
+/0/100/6/0       /dev/nvme0      storage        Samsung SSD 970 EVO Plus 1TB
+/0/100/6/0/0     hwmon1          disk           NVMe disk
+/0/100/6/0/2     /dev/ng0n1      disk           NVMe disk
+/0/100/6/0/1     /dev/nvme0n1    disk           1TB NVMe disk
+/0/100/6/0/1/1   /dev/nvme0n1p1  volume         15MiB reserved partition
+/0/100/6/0/1/2   /dev/nvme0n1p2  volume         1074MiB Windows FAT volume
+/0/100/6/0/1/3   /dev/nvme0n1p3  volume         930GiB EXT4 volume
+/0/100/14                        bus            Tiger Lake-H USB 3.2 Gen 2x1 xHCI Host Controller
+/0/100/14/0      usb1            bus            xHCI Host Controller
+/0/100/14/0/2                    communication  AX210 Bluetooth
+/0/100/14/0/4                    input          AURA LED Controller
+/0/100/14/0/9    input3          input          Microsoft Microsoft® 2.4GHz Transceiver v8.0 System Control
+/0/100/14/0/a                    bus            ASM107x
+/0/100/14/0/b                    multimedia     Jabra Link 390
+/0/100/14/0/d                    bus            USB2.0 Hub
+/0/100/14/0/d/2                  input          NZXT USB Device
+/0/100/14/0/e                    multimedia     USB Audio
+/0/100/14/1      usb2            bus            xHCI Host Controller
+/0/100/14/1/8                    bus            ASM107x
+/0/100/14.2                      memory         RAM memory
+/0/100/15                        bus            Tiger Lake-H Serial IO I2C Controller #0
+/0/100/15.1                      bus            Tiger Lake-H Serial IO I2C Controller #1
+/0/100/16                        communication  Tiger Lake-H Management Engine Interface
+/0/100/17        scsi0           storage        Intel Corporation
+/0/100/17/0      /dev/sda        disk           240GB Solid
+/0/100/17/0/1    /dev/sda1       volume         99MiB Windows FAT volume
+/0/100/17/0/2    /dev/sda2       volume         15MiB reserved partition
+/0/100/17/0/3    /dev/sda3       volume         222GiB Windows NTFS volume
+/0/100/17/0/4    /dev/sda4       volume         508MiB Windows NTFS volume
+/0/100/17/1      /dev/sdb        disk           2TB TOSHIBA DT01ACA2
+/0/100/17/1/1    /dev/sdb1       volume         1863GiB Windows NTFS volume
+/0/100/1b                        bridge         Tiger Lake-H PCIe Root Port #17
+/0/100/1c                        bridge         Tiger Lake-H PCIe Root Port #1
+/0/100/1c.5                      bridge         Intel Corporation
+/0/100/1c.5/0    enp5s0          network        Ethernet Controller I225-V
+/0/100/1c.6                      bridge         Intel Corporation
+/0/100/1c.6/0    enp6s0          network        Ethernet Controller I225-V
+/0/100/1c.7                      bridge         Intel Corporation
+/0/100/1c.7/0    wlp7s0          network        Wi-Fi 6E(802.11ax) AX210/AX1675* 2x2 [Typhoon Peak]
+/0/100/1d                        bridge         Tiger Lake-H PCI Express Root Port #9
+/0/100/1f                        bridge         Z590 LPC/eSPI Controller
+/0/100/1f/0                      system         PnP device PNP0c02
+/0/100/1f/1                      system         PnP device PNP0c02
+/0/100/1f/2                      system         PnP device PNP0c02
+/0/100/1f/3                      system         PnP device PNP0c02
+/0/100/1f/4                      system         PnP device PNP0c02
+/0/100/1f/5                      system         PnP device PNP0c02
+/0/100/1f.3                      multimedia     Tiger Lake-H HD Audio Controller
+/0/100/1f.4                      bus            Tiger Lake-H SMBus Controller
+/0/100/1f.5                      bus            Tiger Lake-H SPI Controller
+/1                               power          To Be Filled By O.E.M.
+/2               card1           multimedia     J390
+/3               card3           multimedia     Audio
+/4               input0          input          Sleep Button
+/5               input1          input          Power Button
+/6               input10         input          Eee PC WMI hotkeys
+/7               input11         input          Asus WMI hotkeys
+/8               input2          input          Power Button
+/9               input9          input          Jabra Link 390

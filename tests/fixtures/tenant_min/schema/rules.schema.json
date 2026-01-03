@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Voxeron Tenant Rules",
+  "type": "object",
+  "properties": {
+    "upsell": {
+      "type": "object",
+      "properties": {
+        "enable": { "type": "boolean" },
+        "never_suggest_if_in_cart": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "category_aliases": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": { "type": "string", "minLength": 1 },
+        "uniqueItems": true
+      }
+    }
+  },
+  "additionalProperties": true
+}
