@@ -129,7 +129,7 @@ class OpenAIClient:
         if prompt:
             kwargs["prompt"] = str(prompt)
 
-        if lang in ("en", "nl", "hi"):
+        if lang in ("en", "nl", "tr", "hi"):
             kwargs["language"] = lang
 
         resp = await self.sdk.audio.transcriptions.create(**kwargs)

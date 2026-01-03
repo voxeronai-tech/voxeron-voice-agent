@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -28,7 +29,9 @@ from .services.openai_client import OpenAIClient
 
 logger = logging.getLogger("taj-agent")
 
-SESSION_CONTROLLER_VERSION = "2026-01-03T-optima-flow-v3-offer-slots-no-repeat-pickup-name-spicy-one-qty-fix-naan-short"
+SESSION_CONTROLLER_VERSION = (
+    "2026-01-03T-optima-flow-v5-full-dropin-name-extract-fix-lang-hysteresis-stronger-stt-softlock-retry"
+)
 
 
 class FlowState(str, Enum):
@@ -93,7 +96,7 @@ class SessionState:
     last_agent_speech_end_ts: float = 0.0
 
     # Naan disambiguation
-    pending_choice: Optional[str] = None            # "nan_variant"
+    pending_choice: Optional[str] = None  # "nan_variant"
     pending_qty: int = 1
     nan_prompt_count: int = 0
 
@@ -102,7 +105,7 @@ class SessionState:
     pending_spice_qty: int = 0
 
     pending_fulfillment: bool = False
-    fulfillment_mode: Optional[str] = None          # "pickup" / "delivery"
+    fulfillment_mode: Optional[str] = None  # "pickup" / "delivery"
 
     pending_name: bool = False
     customer_name: Optional[str] = None
@@ -110,6 +113,10 @@ class SessionState:
     # Offer/selection memory (fixes “Yes, make that two.”)
     offered_item_id: Optional[str] = None
     offered_label: Optional[str] = None
+
+    # Language confidence/hysteresis (prevents flip-flop on one bad STT turn)
+    lang_candidate: Optional[str] = None
+    lang_streak: int = 0
 
 
 QTY_MAP_NL = {"een": 1, "één": 1, "1": 1, "twee": 2, "2": 2, "drie": 3, "3": 3, "vier": 4, "4": 4}
@@ -316,63 +323,177 @@ class SessionController:
         return t in {"no", "nope", "nah", "nee", "neen"} or t.startswith("no ") or t.startswith("nee ")
 
     # -------------------------
-    # Spicy offer helpers (menu-driven, safe introspection)
+    # Language confidence + hysteresis (reply language)
     # -------------------------
-    def _looks_like_naan_context(self, text: str) -> bool:
-        t = norm_simple(text)
-        return ("naan" in t) or ("nan" in t) or ("naam" in t) or detect_generic_nan_request(text) or self._is_naan_options_question(text)
-
-    def _menu_spicy_candidates(self, menu: MenuSnapshot) -> List[Tuple[str, str]]:
+    def _lang_scores(self, text: str) -> Dict[str, float]:
         """
-        Best-effort: try metadata first (default_spice_level == 'SPICY'), fallback to name heuristics.
-        Returns list of (display_name, item_id).
+        Cheap language scoring (not true probability).
+        Used to decide reply language in bilingual real-world calls.
         """
-        if not menu:
-            return []
+        t = " " + norm_simple(text) + " "
+        toks = t.split()
 
-        candidates: List[Tuple[str, str]] = []
+        nl = {
+            "ik", "ben", "mijn", "naam", "niet", "afhalen", "bezorgen", "graag",
+            "welke", "wat", "een", "twee", "drie", "vier", "ja", "nee", "op", "voor",
+            "dit", "deze", "dat", "is"
+        }
+        en = {
+            "i", "my", "name", "please", "pickup", "pick", "up", "delivery", "would", "like",
+            "which", "what", "one", "two", "three", "four", "yes", "no", "for",
+            "this", "that", "is"
+        }
+        tr = {
+            "ben", "adim", "adım", "ismim", "lutfen", "lütfen", "evet", "hayir", "hayır", "adres", "acil"
+        }
 
-        # 1) Metadata-based (if available)
-        meta = getattr(menu, "item_meta", None) or getattr(menu, "meta", None) or getattr(menu, "items_meta", None)
-        if isinstance(meta, dict):
-            for _name, iid in getattr(menu, "name_choices", []) or []:
-                m = meta.get(iid) or meta.get(str(iid)) or {}
-                if isinstance(m, dict):
-                    lvl = (m.get("default_spice_level") or m.get("spice_level") or "").upper()
-                    avail = m.get("is_available", True)
-                    if lvl == "SPICY" and bool(avail):
-                        dn = (menu.display_name(iid) or "").strip()
-                        if dn:
-                            candidates.append((dn, iid))
+        def score(langset: set[str]) -> float:
+            s = 0.0
+            for w in toks:
+                if w in langset:
+                    s += 2.0
+            # phrase bonuses
+            if " my name " in t or " name is " in t:
+                s += 4.0
+            if " mijn naam " in t or " ik ben " in t:
+                s += 4.0
+            if " pickup " in t or " delivery " in t:
+                s += 2.0
+            if " afhalen " in t or " bezorgen " in t:
+                s += 2.0
+            return s
 
-        if candidates:
-            # keep stable, shortest names first for speech
-            candidates.sort(key=lambda x: len(x[0]))
-            return candidates[:5]
+        return {"nl": score(nl), "en": score(en), "tr": score(tr)}
 
-        # 2) Name heuristics fallback
-        spicy_keys = [
-            "vindaloo", "madras", "karahi", "jalfrezi", "phall", "chilli", "chili",
-            "hot", "spicy", "pittig", "heet"
-        ]
-        for _name, iid in getattr(menu, "name_choices", []) or []:
-            dn = (menu.display_name(iid) or "").strip()
-            dnl = dn.lower()
-            if any(k in dnl for k in spicy_keys):
-                candidates.append((dn, iid))
+    def _allow_auto_lang_switch_now(self) -> bool:
+        """
+        If we're inside a micro-flow (name/pickup/spice/naan-choice), do NOT auto-switch reply language.
+        Users often answer short fragments ("pickup", "Marcel") that STT can mis-tag.
+        Explicit switching via detect_language_intent is still allowed.
+        """
+        st = self.state
+        if st.pending_name:
+            return False
+        if st.pending_fulfillment:
+            return False
+        if st.pending_spice_item_id:
+            return False
+        if st.pending_choice:
+            return False
+        return True
 
-        candidates.sort(key=lambda x: len(x[0]))
-        return candidates[:5]
+    def _maybe_update_reply_language(self, transcript: str) -> None:
+        """
+        Switch reply language only on strong evidence, with hysteresis.
+        Prevent one bad STT turn (short sentence) from flipping the whole session.
+        """
+        st = self.state
 
-    def _set_spicy_offer(self, menu: MenuSnapshot) -> Optional[Tuple[str, str]]:
-        cands = self._menu_spicy_candidates(menu)
-        if not cands:
+        if not self._allow_auto_lang_switch_now():
+            st.lang_candidate = None
+            st.lang_streak = 0
+            return
+
+        cfg = st.tenant_cfg
+        supported = set((cfg.supported_langs if cfg else ("en", "nl", "tr")))
+
+        scores = self._lang_scores(transcript)
+        scores = {k: v for k, v in scores.items() if k in supported}
+        if not scores:
+            return
+
+        items = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+        best_lang, best_score = items[0]
+        runner_score = items[1][1] if len(items) > 1 else 0.0
+
+        if best_score <= 0.0:
+            return
+
+        tn = norm_simple(transcript)
+        tok_count = len(tn.split())
+
+        # Absolute minimum evidence (prevents flip on tiny phrases)
+        # Example: "Dit is een pick-up" -> 4 tokens, can be wrong-STT. Require stronger proof.
+        min_score = 8.0 if tok_count <= 4 else 6.0
+        if best_score < min_score:
+            st.lang_candidate = None
+            st.lang_streak = 0
+            return
+
+        ratio = (best_score / max(0.1, runner_score)) if runner_score > 0 else 999.0
+        strong = ratio >= 2.0
+        ultra = ratio >= 3.5
+
+        if not strong:
+            st.lang_candidate = None
+            st.lang_streak = 0
+            return
+
+        if best_lang == st.lang:
+            st.lang_candidate = None
+            st.lang_streak = 0
+            return
+
+        if st.lang_candidate == best_lang:
+            st.lang_streak += 1
+        else:
+            st.lang_candidate = best_lang
+            st.lang_streak = 1
+
+        # For short utterances require 3 strong hits; otherwise 2 strong hits; or 1 ultra-hit.
+        need = 3 if tok_count <= 4 else 2
+        if ultra or st.lang_streak >= need:
+            st.lang = best_lang
+            st.lang_candidate = None
+            st.lang_streak = 0
+
+    # -------------------------
+    # Name extraction (FIXED)
+    # -------------------------
+    def _extract_customer_name(self, text: str) -> Optional[str]:
+        """
+        Extract a name from common phrases (EN/NL), robust to punctuation.
+        """
+        raw = (text or "").strip()
+        if not raw:
             return None
-        dn, iid = cands[0]
-        self.state.offered_item_id = iid
-        self.state.offered_label = dn
-        return (dn, iid)
 
+        # strip trailing punctuation that breaks $-anchored regex matches
+        raw_clean = raw.strip().strip(" .,:;!?")
+        tn = norm_simple(raw_clean)
+
+        bad = {
+            "yes", "yeah", "ok", "okay", "sure", "please", "thanks", "thank you",
+            "ja", "oke", "oké", "prima", "goed", "dank je", "dankjewel", "zeker"
+        }
+        if tn in bad:
+            return None
+
+        patterns = [
+            r"\bmy name is\s+([a-zA-Z][a-zA-Z'\- ]{0,40})$",
+            r"\bname is\s+([a-zA-Z][a-zA-Z'\- ]{0,40})$",
+            r"\byou can put (?:the )?name\s+([a-zA-Z][a-zA-Z'\- ]{0,40})$",
+            r"\bput (?:the )?name\s+([a-zA-Z][a-zA-Z'\- ]{0,40})$",
+            r"\bik ben\s+([a-zA-Z][a-zA-Z'\- ]{0,40})$",
+            r"\bmijn naam is\s+([a-zA-Z][a-zA-Z'\- ]{0,40})$",
+            r"\bnaam is\s+([a-zA-Z][a-zA-Z'\- ]{0,40})$",
+            r"\bop naam\s+([a-zA-Z][a-zA-Z'\- ]{0,40})$",
+        ]
+
+        for pat in patterns:
+            m = re.search(pat, raw_clean, flags=re.IGNORECASE)
+            if m:
+                name = (m.group(1) or "").strip(" .,:;!?")
+                name = " ".join(name.split())
+                if 1 <= len(name) <= 40:
+                    parts = name.split()
+                    return " ".join(parts[:2])
+
+        # fallback: short answer (<=3 words) is probably a name
+        if len(raw_clean.split()) <= 3 and len(raw_clean) <= 40:
+            return raw_clean
+
+        return None
 
     # -------------------------
     # Dynamic menu helpers
@@ -398,10 +519,9 @@ class SessionController:
         if not items:
             return []
 
-        # Optima-style preference: keep short list + common variants first
         prefs = [
-            ("garlic", ["garlic", "knoflook"]),
             ("plain", ["plain", "regular", "normal", "gewoon", "standaard"]),
+            ("garlic", ["garlic", "knoflook"]),
             ("butter", ["butter", "boter"]),
             ("cheese", ["cheese", "kaas"]),
             ("keema", ["keema", "kheema"]),
@@ -428,11 +548,30 @@ class SessionController:
         if not opts:
             return "Which naan would you like, plain or garlic?" if st.lang != "nl" else "Welke naan wil je, plain of garlic?"
 
-        # Short mode: 2 common if available, else first 2
-        # Few mode: show 4 at most
         max_n = 2 if list_mode == "short" else 4
-        picked = opts[:max_n]
-        labels = [p[0] for p in picked]
+
+        picked: List[Tuple[str, str]] = []
+
+        def add_if_contains(tokens: List[str]) -> None:
+            for (label, iid) in opts:
+                l = label.lower()
+                if any(t in l for t in tokens):
+                    if (label, iid) not in picked:
+                        picked.append((label, iid))
+                        return
+
+        add_if_contains(["plain", "regular", "normal", "gewoon", "standaard"])
+        add_if_contains(["garlic", "knoflook"])
+        add_if_contains(["butter", "boter"])
+        add_if_contains(["cheese", "kaas"])
+
+        for o in opts:
+            if o not in picked:
+                picked.append(o)
+            if len(picked) >= max_n:
+                break
+
+        labels = [p[0] for p in picked[:max_n]]
 
         if st.lang == "nl":
             if len(labels) == 1:
@@ -491,18 +630,6 @@ class SessionController:
         if any(x in t for x in ["delivery", "deliver", "bezorgen", "bezorging"]):
             return "delivery"
         return None
-
-    def _looks_like_name_answer(self, text: str) -> bool:
-        t = (text or "").strip()
-        tn = norm_simple(t)
-        if not tn:
-            return False
-        bad = {"yes", "yeah", "ok", "okay", "sure", "ja", "oke", "oké", "prima", "good", "thanks", "thank you"}
-        if tn in bad:
-            return False
-        if len(t.split()) <= 3:
-            return True
-        return False
 
     def _is_dispatcher(self) -> bool:
         if self.state.phase == "dispatcher":
@@ -646,13 +773,27 @@ class SessionController:
 
     def _is_naan_options_question(self, text: str) -> bool:
         t = norm_simple(text)
-        return any(x in t for x in ["what naan", "naan options", "variety of naan", "which naan", "welke naan", "soorten naan"])
+        return any(
+            x in t
+            for x in [
+                "what naan",
+                "naan options",
+                "all naan options",
+                "any other naan",
+                "what else naan",
+                "are those the only",
+                "only naan",
+                "variety of naan",
+                "which naan",
+                "welke naan",
+                "soorten naan",
+                "alle naan opties",
+                "nog meer naan",
+                "andere naan",
+            ]
+        )
 
     def _is_qty_change_for_naan(self, text: str) -> Optional[int]:
-        """
-        Detect 'make it one naan' / 'make it two naan' etc.
-        Best-effort: if they say "make it one" and 'naan' appears, return qty target.
-        """
         t = norm_simple(text)
         if "naan" not in t and "nan" not in t and "naam" not in t:
             return None
@@ -683,13 +824,47 @@ class SessionController:
         try:
             await self.send_thinking(ws)
 
-            stt_lang = st.lang if st.lang in ("en", "nl", "tr") else None
+            # -------- STT lang selection (tenant-aware) --------
+            stt_mode = (getattr(st.tenant_cfg, "stt_mode", None) or "soft_lock").strip().lower()
+            if stt_mode not in ("locked", "auto", "soft_lock"):
+                stt_mode = "soft_lock"
+
+            if stt_mode == "auto":
+                stt_lang = None
+            else:
+                stt_lang = st.lang if st.lang in ("en", "nl", "tr") else None
+
             stt_prompt = None
             if self.tenant_stt_prompt_enabled and st.tenant_cfg and getattr(st.tenant_cfg, "stt_prompt_base", None):
                 stt_prompt = str(st.tenant_cfg.stt_prompt_base)
 
             try:
                 transcript = await self.oa.transcribe_pcm(pcm, stt_lang, prompt=stt_prompt)
+
+                # Soft guard: if forced lang seems clearly wrong, retry once with lang=None (auto) and no prompt.
+                if stt_mode in ("locked", "soft_lock") and stt_lang in ("en", "nl"):
+                    tn = norm_simple(transcript or "")
+                    toks = set(tn.split())
+
+                    dutch_markers = {"ik", "ben", "het", "niet", "mijn", "naam", "afhalen", "bezorgen", "dit"}
+                    en_markers = {"i", "my", "name", "please", "pickup", "delivery", "would", "like", "this"}
+
+                    short = len(tn.split()) <= 10
+
+                    if stt_lang == "en":
+                        looks_nl = (len(toks & dutch_markers) >= 2) and (len(toks & en_markers) == 0)
+                        if looks_nl and short:
+                            retry = await self.oa.transcribe_pcm(pcm, None, prompt=None)
+                            if retry and retry.strip():
+                                transcript = retry
+
+                    if stt_lang == "nl":
+                        looks_en = (len(toks & en_markers) >= 2) and (len(toks & dutch_markers) == 0)
+                        if looks_en and short:
+                            retry = await self.oa.transcribe_pcm(pcm, None, prompt=None)
+                            if retry and retry.strip():
+                                transcript = retry
+
             except Exception:
                 transcript = ""
 
@@ -704,7 +879,10 @@ class SessionController:
             logger.info("STT: %s", transcript)
             await self.send_user_text(ws, transcript)
 
-            # Language switching
+            # -------- Reply language confidence (bilingual safe) --------
+            self._maybe_update_reply_language(transcript)
+
+            # Explicit language switching still allowed (e.g., user says "Nederlands")
             decision = detect_language_intent(
                 transcript,
                 phase=st.phase,
@@ -713,6 +891,8 @@ class SessionController:
             )
             if decision.target and decision.target != st.lang:
                 st.lang = decision.target
+                st.lang_candidate = None
+                st.lang_streak = 0
 
             # Dispatcher handling
             if self._is_dispatcher():
@@ -761,17 +941,7 @@ class SessionController:
             tnorm = norm_simple(transcript)
 
             # -------------------------
-            # Hard guards: never re-ask pickup/name once set
-            # (prevents edge re-prompts if pending flags get stuck)
-            # -------------------------
-            if st.fulfillment_mode:
-                st.pending_fulfillment = False
-            if st.customer_name:
-                st.pending_name = False
-
-            # -------------------------
             # Qty change: "make it one naan"
-            # (best-effort without full remove engine)
             # -------------------------
             if st.menu:
                 q_change = self._is_qty_change_for_naan(transcript)
@@ -779,19 +949,16 @@ class SessionController:
                     naans = self._find_any_naan_in_order()
                     await self.clear_thinking(ws)
                     if not naans:
-                        # If no naan in cart yet, treat as add-one prompt
                         st.pending_choice = "nan_variant"
                         st.pending_qty = max(1, int(q_change))
                         await self._speak(ws, self._naan_optima_prompt(list_mode="short"))
                         return
 
-                    # If there is exactly one naan type in order, set it directly.
                     if len(naans) == 1:
                         st.order.set_qty(naans[0], int(q_change))
                         await self._speak(ws, "Alright." if st.lang != "nl" else "Helemaal goed.")
                         return
 
-                    # Multiple naan types: ask which to change
                     st.pending_choice = "nan_variant"
                     st.pending_qty = max(1, int(q_change))
                     await self._speak(ws, "Which naan should I change, plain or garlic?" if st.lang != "nl" else "Welke naan zal ik aanpassen, plain of garlic?")
@@ -814,7 +981,6 @@ class SessionController:
 
                     await self.clear_thinking(ws)
 
-                    # Do NOT re-ask pickup/name if already known
                     if st.fulfillment_mode and st.customer_name:
                         await self._speak(ws, f"Got it — {qty}x {added_name}. {self._say_anything_else()}")
                         return
@@ -841,7 +1007,6 @@ class SessionController:
                     await self._speak(ws, msg)
                     return
 
-                # We don't store spice in order yet (needs order metadata). Just consume.
                 st.pending_spice_item_id = None
                 st.pending_spice_qty = 0
 
@@ -881,7 +1046,7 @@ class SessionController:
                 await self._speak(ws, msg)
                 return
 
-            # -------- Pending name (do NOT re-ask if already set) --------
+            # -------- Pending name --------
             if st.pending_name:
                 await self.clear_thinking(ws)
                 if st.customer_name:
@@ -889,12 +1054,13 @@ class SessionController:
                     await self._speak(ws, self._say_anything_else())
                     return
 
-                if not self._looks_like_name_answer(transcript):
+                name = self._extract_customer_name(transcript)
+                if not name:
                     msg = "Could you please tell me your name?" if st.lang != "nl" else "Wat is je naam?"
                     await self._speak(ws, msg)
                     return
 
-                st.customer_name = transcript.strip()
+                st.customer_name = name
                 st.pending_name = False
 
                 msg = f"Thank you, {st.customer_name}. {self._say_anything_else()}" if st.lang != "nl" else f"Dank je, {st.customer_name}. {self._say_anything_else()}"
@@ -913,43 +1079,26 @@ class SessionController:
                 await self._speak(ws, msg)
                 return
 
-            # Spicy question (Optima-style):
-            # - If it's about naan: explain naan isn't spicy + steer to main dish spice, then continue naan prompt
-            # - Else: offer a spicy dish from the menu (metadata if possible), and set offered_item_id
+            # Spicy question after lamb list: offer one item and set offered_item_id
             if st.menu and self._is_spicy_query(transcript) and not st.pending_choice:
-                await self.clear_thinking(ws)
-
-                # Naan context spicy question
-                if self._looks_like_naan_context(transcript) or st.pending_choice == "nan_variant":
-                    if st.lang == "nl":
-                        info = "Naan is meestal niet pittig. Als je wilt kan ik het hoofdgerecht pittig laten maken."
-                    else:
-                        info = "Naan is usually not spicy. If you want, we can make your main dish spicy."
-                    # If naan is currently being chosen, continue prompt
-                    if st.pending_choice == "nan_variant":
-                        await self._speak(ws, f"{info} {self._naan_optima_prompt(list_mode='short')}")
-                        return
-                    await self._speak(ws, info)
-                    return
-
-                offered = self._set_spicy_offer(st.menu)
-                if offered:
-                    dn, _iid = offered
-                    msg = (f"The spiciest option is usually {dn}. Would you like that?"
-                           if st.lang != "nl"
-                           else f"De pittigste optie is meestal {dn}. Wil je die?")
-                    await self._speak(ws, msg)
-                    return
-
-                # fallback to lamb heuristic if menu did not provide candidates
                 picks = self._lamb_top3(st.menu)
-                if picks:
-                    dn, iid = picks[0]
-                    st.offered_item_id = iid
-                    st.offered_label = dn
-                    msg = (f"One that can be quite spicy: {dn}. Would you like that?"
-                           if st.lang != "nl"
-                           else f"Eentje die best pittig kan zijn: {dn}. Wil je die?")
+                spicy_order = ["karahi", "madras", "vindaloo", "dhansak", "curry", "korma", "pasanda", "biryani", "tikka"]
+                chosen: Optional[Tuple[str, str]] = None
+                for key in spicy_order:
+                    for dn, iid in picks:
+                        if key in dn.lower():
+                            chosen = (dn, iid)
+                            break
+                    if chosen:
+                        break
+                if not chosen and picks:
+                    chosen = picks[0]
+
+                await self.clear_thinking(ws)
+                if chosen:
+                    st.offered_item_id = chosen[1]
+                    st.offered_label = chosen[0]
+                    msg = f"Usually the spiciest: {chosen[0]}. Would you like that?" if st.lang != "nl" else f"Meestal het pittigst: {chosen[0]}. Wil je die?"
                     await self._speak(ws, msg)
                     return
 
@@ -976,7 +1125,6 @@ class SessionController:
 
                 variant = _extract_nan_variant_keyword(transcript)
 
-                # If they just said "naan" again, default to plain (Optima behavior)
                 if not variant:
                     if any(x in tnorm for x in ["naan", "nan", "naam"]):
                         variant = "plain"
@@ -1030,9 +1178,7 @@ class SessionController:
                     await self._speak(ws, self._naan_optima_prompt(list_mode="few"))
                     return
 
-                # If generic "naan" and menu has multiple, ask short prompt (plain/garlic)
                 if mentions_nan and naan_ambiguous and (not has_variant):
-                    # add non-naan hits first
                     non_nan_hits: List[Tuple[str, int]] = []
                     for item_id, qty in adds:
                         if not self._is_nan_item(st.menu, item_id):
@@ -1047,7 +1193,6 @@ class SessionController:
                     st.pending_qty = max(1, int(effective_qty or 1))
                     st.nan_prompt_count = 0
 
-                    # If butter chicken in same utterance, ask spice first (Optima)
                     if any(self._is_butter_chicken(st.menu, iid) for iid in added_ids):
                         st.pending_spice_item_id = next(iid for iid in added_ids if self._is_butter_chicken(st.menu, iid))
                         st.pending_spice_qty = int(effective_qty or 1)
@@ -1059,18 +1204,15 @@ class SessionController:
                     await self._speak(ws, self._naan_optima_prompt(list_mode="short"))
                     return
 
-                # If explicit naan variant present, add exactly that naan (and avoid ghost extra generic naan)
                 if mentions_nan and has_variant and st.menu:
                     iid = self._find_naan_item_for_variant(st.menu, variant or "")
                     if iid:
                         st.order.add(iid, max(1, int(effective_qty or 1)))
                         added_any = True
                         added_ids.append(iid)
-                        # remove duplicate naan hits from parse_add_item
                         adds = [(x, q) for (x, q) in adds if x != iid and not self._is_nan_item(st.menu, x)]
 
                 for item_id, qty in adds:
-                    # avoid adding generic naan again if variant already handled above
                     if mentions_nan and has_variant and self._is_nan_item(st.menu, item_id):
                         continue
                     st.order.add(item_id, qty)
@@ -1079,7 +1221,6 @@ class SessionController:
 
             cart_after = st.order.summary(st.menu) if st.menu else ""
             if added_any and st.menu and cart_after and cart_after != (cart_before or ""):
-                # If butter chicken added -> spice flow
                 if any(self._is_butter_chicken(st.menu, iid) for iid in added_ids):
                     st.pending_spice_item_id = next(iid for iid in added_ids if self._is_butter_chicken(st.menu, iid))
                     st.pending_spice_qty = int(effective_qty or 1)
@@ -1087,7 +1228,6 @@ class SessionController:
                     await self._speak(ws, "Certainly. And would you like your Butter Chicken mild or spicy?")
                     return
 
-                # Continue fulfillment only if not known
                 await self.clear_thinking(ws)
 
                 if not st.fulfillment_mode:

@@ -31,3 +31,13 @@ _backup_refactor/
 .DS_Store
 .idea/
 .vscode/
+
+# local experiments / scratch
+audio_worklet_test.html
+processor.js
+voice_widget.html
+voice_widget_ptt.html
+capture_neon_schema.sh
+list_files.sh
+neon_schema_snapshot.txt
+voxeron-voice-agent/
