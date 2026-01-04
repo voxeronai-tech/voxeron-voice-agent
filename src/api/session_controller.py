@@ -22,7 +22,6 @@ from .tenant_manager import TenantManager, TenantConfig
 from .policy import (
     SessionPolicyState,
     system_guard_for_llm,
-    post_cart_followup,
 )
 from .services.openai_client import OpenAIClient
 from .telemetry.emitter import TelemetryEmitter, TelemetryContext
@@ -43,7 +42,34 @@ def _telemetry_ctx(st) -> TelemetryContext:
         domain=str(getattr(st, "tenant_ref", "unknown")),
     )
 
-SESSION_CONTROLLER_VERSION = "2026-01-03T-optima-flow-v3-offer-slots-no-repeat-pickup-name-spicy-one-qty-fix-naan-short"
+
+SESSION_CONTROLLER_VERSION = "2026-01-04T-intent-first-soft-stt-lang-taj-fulfillment-stt-override"
+
+# Fulfillment prompts (strong, anti-bias)
+FULFILLMENT_STT_PROMPT_EN = (
+    "The user is answering: pickup or delivery. "
+    "Return only what the user said. Likely answers: pickup, pick up, for pickup, takeaway, collection, delivery, for delivery."
+)
+
+FULFILLMENT_STT_PROMPT_NL = (
+    "De gebruiker antwoordt op: afhalen of bezorgen. "
+    "Geef alleen wat de gebruiker zei. Waarschijnlijke antwoorden: afhalen, ophalen, meenemen, to go, bezorgen, bezorging."
+)
+
+NAME_STT_PROMPT = (
+    "The user is giving their name for a restaurant order. "
+    "This is likely a short name (e.g., Jerry, Marcel, Tom, Sara). "
+    "Transcribe the name exactly. "
+    "Do NOT turn it into commands like 'ik wil bestellen', 'pickup', or 'delivery'."
+)
+
+# Temporary deterministic alias overlay for Taj (until Tenant Overlay / Discovery Engine lands)
+TAJ_EXTRA_ALIASES: Dict[str, str] = {
+    "tikken": "Chicken Tikka",
+    "tikka": "Chicken Tikka",
+    "tika": "Chicken Tikka",
+    "bestellen": "__GLOBAL_ORDER__",  # useful for intent guard (not a menu item)
+}
 
 
 class FlowState(str, Enum):
@@ -86,6 +112,7 @@ class SessionState:
     tenant_name: str = ""
     tenant_cfg: Optional[TenantConfig] = None
 
+    # Output language (Taj: stable EN unless explicit "Nederlands")
     lang: str = "en"
     phase: str = "language_select"  # language_select | dispatcher | chat
     order: OrderState = field(default_factory=OrderState)
@@ -108,23 +135,24 @@ class SessionState:
     last_agent_speech_end_ts: float = 0.0
 
     # Naan disambiguation
-    pending_choice: Optional[str] = None            # "nan_variant"
+    pending_choice: Optional[str] = None  # "nan_variant"
     pending_qty: int = 1
     nan_prompt_count: int = 0
 
-    # Optima micro-flows
-    pending_spice_item_id: Optional[str] = None
-    pending_spice_qty: int = 0
-
     pending_fulfillment: bool = False
-    fulfillment_mode: Optional[str] = None          # "pickup" / "delivery"
+    fulfillment_mode: Optional[str] = None  # "pickup" / "delivery"
 
     pending_name: bool = False
     customer_name: Optional[str] = None
 
-    # Offer/selection memory (fixes “Yes, make that two.”)
+    # Offer/selection memory
     offered_item_id: Optional[str] = None
     offered_label: Optional[str] = None
+
+    # Language hysteresis (for STT hinting; does NOT automatically change output language for Taj)
+    stt_lang_hint: Optional[str] = None
+    lang_candidate: Optional[str] = None
+    lang_candidate_count: int = 0
 
 
 QTY_MAP_NL = {"een": 1, "één": 1, "1": 1, "twee": 2, "2": 2, "drie": 3, "3": 3, "vier": 4, "4": 4}
@@ -139,6 +167,14 @@ def _extract_qty_first(text: str, lang: str) -> Optional[int]:
         if tok in m:
             return int(m[tok])
     return None
+
+
+def _safe_json_loads(s: str) -> Optional[Dict[str, Any]]:
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
 
 
 def _looks_like_stt_prompt_dump(text: str) -> bool:
@@ -238,33 +274,58 @@ def build_llm_messages(state: SessionState, user_text: str, menu_context: str) -
 async def llm_turn(oa: OpenAIClient, state: SessionState, user_text: str, menu_context: str) -> Dict[str, Any]:
     msgs = build_llm_messages(state, user_text, menu_context)
     txt = await oa.chat(msgs, temperature=0.2)
-    try:
-        return json.loads(txt)
-    except Exception:
-        return {"reply": txt, "add": [], "remove": []}
+    obj = _safe_json_loads(txt)
+    return obj if obj else {"reply": txt, "add": [], "remove": []}
 
 
-def _extract_nan_variant_keyword(text: str) -> Optional[str]:
-    t = " " + norm_simple(text) + " "
+# -------------------------
+# Naan keyword parsing (SCOPED)
+# -------------------------
+_NAAN_TOKENS = {"naan", "nan", "naam"}
+_PLAIN_LIKE = {
+    "plain", "regular", "normal", "gewoon", "normaal", "standaard",
+    "plainer", "plainar", "planar", "plano", "playn", "plean",
+}
+_VARIANT_TOKS = {
+    "garlic": {"garlic", "knoflook"},
+    "butter": {"butter", "boter"},
+    "cheese": {"cheese", "kaas"},
+    "keema": {"keema", "kheema"},
+    "peshawari": {"peshawari"},
+}
 
-    plain_like = [
-        " plain ", " plainer ", " plainar ", " planar ", " plano ", " playn ", " plean ",
-        " gewoon ", " normaal ", " standaard ", " regular ", " normal "
-    ]
-    if any(tok in t for tok in plain_like):
-        return "plain"
 
-    mapping = {
-        "garlic": [" garlic ", " knoflook "],
-        "butter": [" butter ", " boter "],
-        "cheese": [" cheese ", " kaas "],
-        "keema": [" keema ", " kheema "],
-        "peshawari": [" peshawari "],
-    }
-    for canonical, toks in mapping.items():
-        for tok in toks:
-            if tok in t:
+def _extract_nan_variant_keyword_scoped(text: str) -> Optional[str]:
+    t = norm_simple(text)
+    if not t:
+        return None
+    toks = t.split()
+    naan_idxs = [i for i, tok in enumerate(toks) if tok in _NAAN_TOKENS]
+    if not naan_idxs:
+        return None
+
+    def window(i: int, r: int = 3) -> List[str]:
+        lo = max(0, i - r)
+        hi = min(len(toks), i + r + 1)
+        return toks[lo:hi]
+
+    for idx in naan_idxs:
+        w = window(idx, 3)
+        if any(tok in _PLAIN_LIKE for tok in w):
+            return "plain"
+
+    for idx in naan_idxs:
+        w = set(window(idx, 3))
+        for canonical, variants in _VARIANT_TOKS.items():
+            if w.intersection(variants):
                 return canonical
+
+    joined = " " + " ".join(toks) + " "
+    for canonical, variants in _VARIANT_TOKS.items():
+        for v in variants:
+            if f" {v} naan " in joined or f" naan {v} " in joined or f" {v} nan " in joined or f" nan {v} " in joined:
+                return canonical
+
     return None
 
 
@@ -308,7 +369,7 @@ class SessionController:
         self.tts_end = tts_end
 
     # -------------------------
-    # Small language helpers
+    # UX strings
     # -------------------------
     def _say_anything_else(self) -> str:
         return "Anything else you'd like to add?" if self.state.lang != "nl" else "Wil je nog iets toevoegen?"
@@ -316,89 +377,87 @@ class SessionController:
     def _say_pickup_or_delivery(self) -> str:
         return "Is this for pickup or delivery?" if self.state.lang != "nl" else "Is dit om af te halen of om te bezorgen?"
 
-    def _is_affirmative(self, text: str) -> bool:
-        t = norm_simple(text)
-        if self.state.lang == "nl":
-            return t in {"ja", "zeker", "graag", "doe maar", "yes"} or t.startswith("ja ")
-        return t in {"yes", "yeah", "yep", "sure", "please", "correct", "right"} or t.startswith("yes ")
-
-    def _is_that_ref(self, text: str) -> bool:
-        t = norm_simple(text)
-        return any(x in t for x in ["that", "that one", "the one", "die", "die daar", "deze", "die ene", "spicy one", "the spicy one"])
-
-    def _is_negation(self, text: str) -> bool:
-        t = norm_simple(text)
-        return t in {"no", "nope", "nah", "nee", "neen"} or t.startswith("no ") or t.startswith("nee ")
-
     # -------------------------
-    # Spicy offer helpers (menu-driven, safe introspection)
+    # Deterministic guards
     # -------------------------
-    def _looks_like_naan_context(self, text: str) -> bool:
+    def _is_obvious_out_of_scope(self, text: str) -> bool:
         t = norm_simple(text)
-        return ("naan" in t) or ("nan" in t) or ("naam" in t) or detect_generic_nan_request(text) or self._is_naan_options_question(text)
+        return any(x in t for x in ["weather", "weer", "temperature", "temperatuur", "forecast", "regen", "sunny", "zonnig"])
 
-    def _menu_spicy_candidates(self, menu: MenuSnapshot) -> List[Tuple[str, str]]:
-        """
-        Best-effort: try metadata first (default_spice_level == 'SPICY'), fallback to name heuristics.
-        Returns list of (display_name, item_id).
-        """
-        if not menu:
-            return []
-
-        candidates: List[Tuple[str, str]] = []
-
-        # 1) Metadata-based (if available)
-        meta = getattr(menu, "item_meta", None) or getattr(menu, "meta", None) or getattr(menu, "items_meta", None)
-        if isinstance(meta, dict):
-            for _name, iid in getattr(menu, "name_choices", []) or []:
-                m = meta.get(iid) or meta.get(str(iid)) or {}
-                if isinstance(m, dict):
-                    lvl = (m.get("default_spice_level") or m.get("spice_level") or "").upper()
-                    avail = m.get("is_available", True)
-                    if lvl == "SPICY" and bool(avail):
-                        dn = (menu.display_name(iid) or "").strip()
-                        if dn:
-                            candidates.append((dn, iid))
-
-        if candidates:
-            # keep stable, shortest names first for speech
-            candidates.sort(key=lambda x: len(x[0]))
-            return candidates[:5]
-
-        # 2) Name heuristics fallback
-        spicy_keys = [
-            "vindaloo", "madras", "karahi", "jalfrezi", "phall", "chilli", "chili",
-            "hot", "spicy", "pittig", "heet"
+    def _is_order_summary_query(self, text: str) -> bool:
+        t = " " + norm_simple(text) + " "
+        keys = [
+            " what is the order ", " current order ", " total order ", " order now ", " order summary ",
+            " wat is de order ", " wat is die order ", " wat is mijn bestelling ", " huidige bestelling ",
+            " wat is de current order ", " wat is de bestelling ", " wat heb ik besteld ", " wat is de order nou ",
         ]
-        for _name, iid in getattr(menu, "name_choices", []) or []:
-            dn = (menu.display_name(iid) or "").strip()
-            dnl = dn.lower()
-            if any(k in dnl for k in spicy_keys):
-                candidates.append((dn, iid))
+        return any(k in t for k in keys)
 
-        candidates.sort(key=lambda x: len(x[0]))
-        return candidates[:5]
+    def _is_refusal_like(self, text: str) -> bool:
+        t = " " + norm_simple(text) + " "
+        refusal = [
+            " no ", " nope ", " nah ", " i won't ", " i will not ", " dont ", " don't ", " rather not ",
+            " nee ", " neen ", " wil ik niet ", " geen ", " liever niet ", " weiger ",
+        ]
+        return any(r in t for r in refusal)
 
-    def _set_spicy_offer(self, menu: MenuSnapshot) -> Optional[Tuple[str, str]]:
-        cands = self._menu_spicy_candidates(menu)
-        if not cands:
-            return None
-        dn, iid = cands[0]
-        self.state.offered_item_id = iid
-        self.state.offered_label = dn
-        return (dn, iid)
+    def _is_ordering_intent_global(self, text: str) -> bool:
+        """
+        IMPORTANT: protect short names from prompt-bias hallucination.
+        - single word: only trigger if it's EXACTLY a command word.
+        - multi-word: allow intent phrases.
+        """
+        raw = (text or "").strip().lower()
+        words = [w for w in raw.split() if w]
+        if not words:
+            return False
 
+        if len(words) == 1:
+            return raw in {"bestellen", "order", "ordering", "start", "begin"}
+
+        t = " " + norm_simple(text) + " "
+        hits = [
+            " ik wil bestellen ",
+            " wil bestellen ",
+            " i want to order ",
+            " i'd like to order ",
+            " i would like to order ",
+            " i want to order food ",
+        ]
+        return any(h in t for h in hits)
+
+    def _is_language_command(self, text: str) -> Optional[str]:
+        t = " " + norm_simple(text) + " "
+        if " nederlands " in t or " dutch " in t:
+            return "nl"
+        if " english " in t or " engels " in t:
+            return "en"
+        return None
+
+    def _looks_like_name_answer(self, text: str) -> bool:
+        t_raw = (text or "").strip()
+        tn = norm_simple(t_raw)
+        if not tn:
+            return False
+        if self._is_refusal_like(text):
+            return False
+        if self._is_order_summary_query(text):
+            return False
+        if self._is_ordering_intent_global(text):
+            return False
+        if "?" in t_raw:
+            return False
+        bad = {"yes", "yeah", "ok", "okay", "sure", "ja", "oke", "oké", "prima", "good", "thanks", "thank you"}
+        if tn in bad:
+            return False
+        return len(t_raw.split()) <= 3
 
     # -------------------------
-    # Dynamic menu helpers
+    # Menu helpers
     # -------------------------
     def _is_nan_item(self, menu: MenuSnapshot, item_id: str) -> bool:
         dn = (menu.display_name(item_id) or "").lower()
         return ("naan" in dn) or ("nan" in dn) or ("naam" in dn)
-
-    def _is_butter_chicken(self, menu: MenuSnapshot, item_id: str) -> bool:
-        dn = (menu.display_name(item_id) or "").lower()
-        return "butter chicken" in dn
 
     def _naan_options_from_menu(self, menu: MenuSnapshot) -> List[Tuple[str, str]]:
         if not menu:
@@ -413,10 +472,9 @@ class SessionController:
         if not items:
             return []
 
-        # Optima-style preference: keep short list + common variants first
         prefs = [
             ("garlic", ["garlic", "knoflook"]),
-            ("plain", ["plain", "regular", "normal", "gewoon", "standaard"]),
+            ("plain", ["naan", "nan", "plain", "regular", "normal", "gewoon", "standaard"]),
             ("butter", ["butter", "boter"]),
             ("cheese", ["cheese", "kaas"]),
             ("keema", ["keema", "kheema"]),
@@ -424,7 +482,9 @@ class SessionController:
         ]
 
         def score(label: str) -> int:
-            ll = label.lower()
+            ll = label.lower().strip()
+            if ll in {"nan", "naan"}:
+                return 120
             for i, (_k, toks) in enumerate(prefs):
                 if any(t in ll for t in toks):
                     return 100 - i
@@ -433,34 +493,40 @@ class SessionController:
         items.sort(key=lambda x: (score(x[0]), -len(x[0])), reverse=True)
         return items
 
-    def _naan_optima_prompt(self, *, list_mode: str = "short") -> str:
+    def _naan_optima_prompt(self, *, list_mode: str = "short", with_main: Optional[str] = None) -> str:
         st = self.state
         menu = st.menu
-        if not menu:
-            return "Which naan would you like, plain or garlic?" if st.lang != "nl" else "Welke naan wil je, plain of garlic?"
-
-        opts = self._naan_options_from_menu(menu)
-        if not opts:
-            return "Which naan would you like, plain or garlic?" if st.lang != "nl" else "Welke naan wil je, plain of garlic?"
-
-        # Short mode: 2 common if available, else first 2
-        # Few mode: show 4 at most
+        opts = self._naan_options_from_menu(menu) if menu else []
         max_n = 2 if list_mode == "short" else 4
+
+        if not opts:
+            if st.lang != "nl":
+                return (
+                    f"Certainly. Would you like plain naan or garlic naan with your {with_main}?"
+                    if with_main
+                    else "Which naan would you like, plain or garlic?"
+                )
+            return (
+                f"Zeker. Wil je plain naan of garlic naan bij je {with_main}?"
+                if with_main
+                else "Welke naan wil je, plain of garlic?"
+            )
+
         picked = opts[:max_n]
         labels = [p[0] for p in picked]
 
-        if st.lang == "nl":
-            if len(labels) == 1:
-                return f"We hebben {labels[0]}. Wil je die?"
-            if len(labels) == 2:
-                return f"Wil je {labels[0]} of {labels[1]}?"
-            return f"We hebben bijvoorbeeld {', '.join(labels[:-1])}, en {labels[-1]}. Welke wil je?"
-        else:
-            if len(labels) == 1:
-                return f"We have {labels[0]}. Would you like that?"
-            if len(labels) == 2:
+        if st.lang != "nl":
+            if with_main and len(labels) >= 2:
+                return f"Certainly. Would you like {labels[0]} or {labels[1]} with your {with_main}?"
+            if len(labels) >= 2:
                 return f"Would you like {labels[0]} or {labels[1]}?"
-            return f"We have a few options like {', '.join(labels[:-1])}, and {labels[-1]}. Which would you prefer?"
+            return f"We have {labels[0]}. Would you like that?"
+        else:
+            if with_main and len(labels) >= 2:
+                return f"Zeker. Wil je {labels[0]} of {labels[1]} bij je {with_main}?"
+            if len(labels) >= 2:
+                return f"Wil je {labels[0]} of {labels[1]}?"
+            return f"We hebben {labels[0]}. Wil je die?"
 
     def _find_naan_item_for_variant(self, menu: MenuSnapshot, variant: str) -> Optional[str]:
         if not menu or not variant:
@@ -471,53 +537,45 @@ class SessionController:
             return None
 
         best: Optional[str] = None
-        best_score = -1
+        best_score = -10
+
         for label, iid in opts:
-            ll = label.lower()
+            ll = label.lower().strip()
             s = 0
-            if v in ll:
-                s += 10
-            if v == "plain" and any(t in ll for t in ["plain", "regular", "normal", "gewoon", "standaard"]):
-                s += 12
+
+            if v == "plain":
+                if ll in {"nan", "naan"}:
+                    s += 50
+                if any(t in ll for t in ["plain", "regular", "normal", "gewoon", "standaard"]):
+                    s += 20
+
             if v == "garlic" and any(t in ll for t in ["garlic", "knoflook"]):
-                s += 12
+                s += 25
             if v == "butter" and any(t in ll for t in ["butter", "boter"]):
-                s += 12
+                s += 25
+            if v == "cheese" and any(t in ll for t in ["cheese", "kaas"]):
+                s += 25
+            if v == "keema" and "keema" in ll:
+                s += 25
+            if v == "peshawari" and "peshawari" in ll:
+                s += 25
+
+            if v in ll:
+                s += 8
+
             if s > best_score:
                 best_score = s
                 best = iid
 
         return best if best_score >= 0 else None
 
-    def _parse_spice_pref(self, text: str) -> Optional[str]:
-        t = norm_simple(text)
-        if any(x in t for x in ["mild", "not spicy", "niet pittig", "zacht"]):
-            return "mild"
-        if any(x in t for x in ["medium", "gemiddeld", "medium pittig"]):
-            return "medium"
-        if any(x in t for x in ["spicy", "hot", "very spicy", "heet", "pittig", "heel pittig"]):
-            return "spicy"
-        return None
-
     def _parse_fulfillment(self, text: str) -> Optional[str]:
         t = norm_simple(text)
-        if any(x in t for x in ["pickup", "pick up", "afhalen", "haal ik", "kom het halen", "voor pickup", "voor pick-up"]):
+        if any(x in t for x in ["pickup", "pick up", "takeaway", "collection", "for pickup", "afhalen", "ophalen", "meenemen", "to go", "togo"]):
             return "pickup"
-        if any(x in t for x in ["delivery", "deliver", "bezorgen", "bezorging"]):
+        if any(x in t for x in ["delivery", "deliver", "for delivery", "bezorgen", "bezorging"]):
             return "delivery"
         return None
-
-    def _looks_like_name_answer(self, text: str) -> bool:
-        t = (text or "").strip()
-        tn = norm_simple(t)
-        if not tn:
-            return False
-        bad = {"yes", "yeah", "ok", "okay", "sure", "ja", "oke", "oké", "prima", "good", "thanks", "thank you"}
-        if tn in bad:
-            return False
-        if len(t.split()) <= 3:
-            return True
-        return False
 
     def _is_dispatcher(self) -> bool:
         if self.state.phase == "dispatcher":
@@ -531,7 +589,6 @@ class SessionController:
 
     def _dispatcher_route(self, text: str) -> Optional[str]:
         t = norm_simple(text)
-
         turkish = ["tesisat", "tesisatçı", "tamir", "sızınt", "boru", "su bas", "gaz kok"]
         plumber_nl = ["loodgieter", "lekkage", "spoed", "water", "leiding", "verstopping", "afvoer"]
         plumber_en = ["plumber", "leak", "burst", "pipe", "flood", "repair", "emergency"]
@@ -544,15 +601,12 @@ class SessionController:
             return "abt"
         if any(k in t for k in food_nl) or any(k in t for k in food_en):
             return "taj_mahal"
-
         return None
 
     async def _load_tenant_context(self, tenant_ref: str) -> None:
         st = self.state
-
         st.locked_voice = None
         st.locked_tts_instr = None
-
         st.tenant_ref = tenant_ref
 
         try:
@@ -575,6 +629,13 @@ class SessionController:
         if snap:
             st.tenant_id = snap.tenant_id
             st.tenant_name = snap.tenant_name
+
+        if tenant_ref == "taj_mahal":
+            if st.lang not in ("en", "nl"):
+                st.lang = "en"
+            st.stt_lang_hint = None
+            st.lang_candidate = None
+            st.lang_candidate_count = 0
 
     async def _speak(self, ws: WebSocket, text: str) -> None:
         await self.send_agent_text(ws, text)
@@ -616,78 +677,6 @@ class SessionController:
         except asyncio.CancelledError:
             return
 
-    def _lamb_top3(self, menu: MenuSnapshot) -> List[Tuple[str, str]]:
-        if not menu:
-            return []
-        preferred = [
-            "lamb karahi",
-            "lamb pasanda",
-            "lamb biryani",
-            "lamb tikka",
-            "lamb curry",
-            "lamb dhansak",
-            "korma",
-            "madras",
-        ]
-
-        lambs: List[Tuple[str, str]] = []
-        for _name, iid in menu.name_choices:
-            dn = (menu.display_name(iid) or "").strip()
-            dn_l = dn.lower()
-            if "lamb" in dn_l or "lam" in dn_l:
-                lambs.append((dn, iid))
-
-        if not lambs:
-            return []
-
-        picked: List[Tuple[str, str]] = []
-        for p in preferred:
-            for dn, iid in lambs:
-                if p in dn.lower() and (dn, iid) not in picked:
-                    picked.append((dn, iid))
-                if len(picked) >= 3:
-                    return picked
-
-        for dn, iid in lambs:
-            if (dn, iid) not in picked:
-                picked.append((dn, iid))
-            if len(picked) >= 3:
-                break
-        return picked
-
-    def _is_spicy_query(self, text: str) -> bool:
-        t = norm_simple(text)
-        return any(x in t for x in ["spicy", "very spicy", "hot", "heet", "pittig", "heel pittig", "spicy one", "the spicy one"])
-
-    def _is_naan_options_question(self, text: str) -> bool:
-        t = norm_simple(text)
-        return any(x in t for x in ["what naan", "naan options", "variety of naan", "which naan", "welke naan", "soorten naan"])
-
-    def _is_qty_change_for_naan(self, text: str) -> Optional[int]:
-        """
-        Detect 'make it one naan' / 'make it two naan' etc.
-        Best-effort: if they say "make it one" and 'naan' appears, return qty target.
-        """
-        t = norm_simple(text)
-        if "naan" not in t and "nan" not in t and "naam" not in t:
-            return None
-        q = _extract_qty_first(text, "en") or _extract_qty_first(text, "nl")
-        if q and any(x in t for x in ["make it", "change it", "maak er", "doe er", "in plaats van", "instead of"]):
-            return int(q)
-        return None
-
-    def _find_any_naan_in_order(self) -> List[str]:
-        st = self.state
-        if not st.menu:
-            return []
-        out: List[str] = []
-        for iid, qty in st.order.items.items():
-            if int(qty or 0) <= 0:
-                continue
-            if self._is_nan_item(st.menu, iid):
-                out.append(iid)
-        return out
-
     async def process_utterance(self, ws: WebSocket, pcm: bytes) -> None:
         st = self.state
         if st.is_processing:
@@ -698,38 +687,137 @@ class SessionController:
         try:
             await self.send_thinking(ws)
 
-            stt_lang = st.lang if st.lang in ("en", "nl", "tr") else None
-            stt_prompt = None
-            if self.tenant_stt_prompt_enabled and st.tenant_cfg and getattr(st.tenant_cfg, "stt_prompt_base", None):
-                stt_prompt = str(st.tenant_cfg.stt_prompt_base)
+            # ----------------------------------------------------------
+            # STT MODE SELECTION (critical fix)
+            # If we're slot-filling, do NOT use tenant stt_prompt_base.
+            # Use dedicated prompts to avoid "bestellen" bias.
+            # ----------------------------------------------------------
+            transcript = ""
 
-            try:
-                transcript = await self.oa.transcribe_pcm(pcm, stt_lang, prompt=stt_prompt)
-            except Exception:
-                transcript = ""
+            # 1) Name capture: primary pass with NAME prompt (no tenant base prompt)
+            if st.pending_name:
+                try:
+                    transcript = await self.oa.transcribe_pcm(pcm, None, prompt=NAME_STT_PROMPT)
+                except Exception:
+                    transcript = ""
+
+            # 2) Fulfillment capture: primary pass with fulfillment prompt(s)
+            elif st.pending_fulfillment:
+                # We do NOT trust the tenant base prompt here. We try EN and NL prompts and pick the one that parses.
+                candidates: List[Tuple[str, str]] = []  # (txt, label)
+                try:
+                    txt = await self.oa.transcribe_pcm(pcm, None, prompt=FULFILLMENT_STT_PROMPT_EN)
+                    candidates.append(((txt or "").strip(), "fulfill_en_any"))
+                except Exception:
+                    pass
+                try:
+                    txt = await self.oa.transcribe_pcm(pcm, "en", prompt=FULFILLMENT_STT_PROMPT_EN)
+                    candidates.append(((txt or "").strip(), "fulfill_en_forced"))
+                except Exception:
+                    pass
+                try:
+                    txt = await self.oa.transcribe_pcm(pcm, None, prompt=FULFILLMENT_STT_PROMPT_NL)
+                    candidates.append(((txt or "").strip(), "fulfill_nl_any"))
+                except Exception:
+                    pass
+                try:
+                    txt = await self.oa.transcribe_pcm(pcm, "nl", prompt=FULFILLMENT_STT_PROMPT_NL)
+                    candidates.append(((txt or "").strip(), "fulfill_nl_forced"))
+                except Exception:
+                    pass
+
+                picked = ""
+                for txt, label in candidates:
+                    if not txt:
+                        continue
+                    mode = self._parse_fulfillment(txt)
+                    if mode:
+                        logger.info("STT(fulfillment_pick=%s): %s -> %s", label, txt, mode)
+                        picked = txt
+                        break
+
+                transcript = picked or (candidates[0][0] if candidates else "")
+
+            # 3) Normal speech: allow Taj multilingual STT; tenant prompt base allowed
+            else:
+                # Taj: multilingual STT unless explicit NL output selected
+                stt_lang: Optional[str] = None
+                if st.tenant_ref == "taj_mahal":
+                    stt_lang = "nl" if st.lang == "nl" else None
+                else:
+                    stt_lang = st.lang if st.lang in ("en", "nl", "tr") else None
+
+                stt_prompt = None
+                if self.tenant_stt_prompt_enabled and st.tenant_cfg and getattr(st.tenant_cfg, "stt_prompt_base", None):
+                    stt_prompt = str(st.tenant_cfg.stt_prompt_base)
+
+                try:
+                    transcript = await self.oa.transcribe_pcm(pcm, stt_lang, prompt=stt_prompt)
+                except Exception:
+                    transcript = ""
 
             if not transcript or not transcript.strip():
                 await self.clear_thinking(ws)
-                msg = "Sorry — I didn’t catch that. Could you repeat?" if st.lang != "nl" else "Sorry — ik verstond het niet. Kun je het herhalen?"
+                msg = (
+                    "Sorry — I didn’t catch that. Could you repeat?"
+                    if st.lang != "nl"
+                    else "Sorry — ik verstond het niet. Kun je het herhalen?"
+                )
                 await self._speak(ws, msg)
                 return
 
             st.last_activity_ts = time.time()
             transcript = transcript.strip()
+
             logger.info("STT: %s", transcript)
             await self.send_user_text(ws, transcript)
+            tnorm = " " + norm_simple(transcript) + " "
 
-            # Language switching
-            decision = detect_language_intent(
+            # ==========================================================
+            # 1) Global intent guard (Intent-First)
+            # IMPORTANT FIX:
+            # - do NOT clear pending_fulfillment / pending_name based on possibly-biased STT
+            # - only clear slots when we're NOT currently slot-filling
+            # ==========================================================
+            is_ordering_intent = self._is_ordering_intent_global(transcript)
+            lang_cmd = self._is_language_command(transcript)
+
+            if is_ordering_intent and not (st.pending_fulfillment or st.pending_name):
+                if st.pending_name or st.pending_fulfillment:
+                    logger.info(
+                        "[v0.7.1] Global Guard: ordering intent intercepted; clearing slots (pending_name=%s pending_fulfillment=%s)",
+                        st.pending_name,
+                        st.pending_fulfillment,
+                    )
+                st.pending_name = False
+                st.pending_fulfillment = False
+            elif is_ordering_intent and (st.pending_fulfillment or st.pending_name):
+                logger.info(
+                    "[v0.7.1] Global Guard: ordering intent seen during slot-fill; IGNORE (pending_name=%s pending_fulfillment=%s)",
+                    st.pending_name,
+                    st.pending_fulfillment,
+                )
+
+            # ==========================================================
+            # 2) Language command handling (Taj explicit only)
+            # ==========================================================
+            if lang_cmd and lang_cmd != st.lang:
+                logger.info("[lang] explicit switch %s -> %s", st.lang, lang_cmd)
+                st.lang = lang_cmd
+                if st.tenant_ref == "taj_mahal" and st.lang == "nl":
+                    st.stt_lang_hint = "nl"
+
+            allow_auto = not (st.tenant_ref == "taj_mahal" and st.lang != "nl")
+            _ = detect_language_intent(
                 transcript,
                 phase=st.phase,
                 current_lang=st.lang,
-                allow_auto_detect=True,
+                allow_auto_detect=allow_auto,
             )
-            if decision.target and decision.target != st.lang:
-                st.lang = decision.target
 
-            # Dispatcher handling
+            # ==========================================================
+            # 3) Dispatcher routing
+            # ==========================================================
             if self._is_dispatcher():
                 target = self._dispatcher_route(transcript)
                 if not target:
@@ -738,18 +826,15 @@ class SessionController:
                     return
 
                 await self.clear_thinking(ws)
-
                 if target == "taj_mahal":
                     await self._speak(ws, "Okay — connecting you now." if st.lang != "nl" else "Prima — ik verbind u nu door.")
                     logger.info("[hot_swap] from=%s to=%s", st.tenant_ref, target)
-
                     await self._load_tenant_context(target)
                     st.phase = "chat"
-
                     taj_greet = (
-                        "Good evening, Taj Mahal Bussum. How can I help you today?"
+                        "Hi! Welcome to Taj Mahal Bussum. You can start ordering now. If you want Dutch, say 'Nederlands'."
                         if st.lang != "nl"
-                        else "Goedenavond, Taj Mahal Bussum. Hoe kan ik u helpen?"
+                        else "Welkom bij Taj Mahal Bussum. Je kunt nu bestellen."
                     )
                     await self._speak(ws, taj_greet)
                     return
@@ -762,7 +847,9 @@ class SessionController:
                     await self._speak(ws, "Alphabouwtechniek. Wat is er aan de hand?")
                     return
 
-            # Restaurant mode
+            # ==========================================================
+            # 4) Deterministic prompt-dump filter
+            # ==========================================================
             if _looks_like_stt_prompt_dump(transcript):
                 await self.clear_thinking(ws)
                 msg = (
@@ -773,110 +860,21 @@ class SessionController:
                 await self._speak(ws, msg)
                 return
 
-            tnorm = norm_simple(transcript)
-
-            # -------------------------
-            # Hard guards: never re-ask pickup/name once set
-            # (prevents edge re-prompts if pending flags get stuck)
-            # -------------------------
-            if st.fulfillment_mode:
-                st.pending_fulfillment = False
-            if st.customer_name:
-                st.pending_name = False
-
-            # -------------------------
-            # Qty change: "make it one naan"
-            # (best-effort without full remove engine)
-            # -------------------------
-            if st.menu:
-                q_change = self._is_qty_change_for_naan(transcript)
-                if q_change is not None:
-                    naans = self._find_any_naan_in_order()
-                    await self.clear_thinking(ws)
-                    if not naans:
-                        # If no naan in cart yet, treat as add-one prompt
-                        st.pending_choice = "nan_variant"
-                        st.pending_qty = max(1, int(q_change))
-                        await self._speak(ws, self._naan_optima_prompt(list_mode="short"))
-                        return
-
-                    # If there is exactly one naan type in order, set it directly.
-                    if len(naans) == 1:
-                        st.order.set_qty(naans[0], int(q_change))
-                        await self._speak(ws, "Alright." if st.lang != "nl" else "Helemaal goed.")
-                        return
-
-                    # Multiple naan types: ask which to change
-                    st.pending_choice = "nan_variant"
-                    st.pending_qty = max(1, int(q_change))
-                    await self._speak(ws, "Which naan should I change, plain or garlic?" if st.lang != "nl" else "Welke naan zal ik aanpassen, plain of garlic?")
-                    return
-
-            # -------------------------
-            # Fix: accept offered item with "spicy one/that one" and qty
-            # -------------------------
-            if st.offered_item_id and st.menu:
-                qty = _extract_qty_first(transcript, "en") or _extract_qty_first(transcript, "nl") or 1
-                if (
-                    self._is_affirmative(transcript)
-                    or self._is_that_ref(transcript)
-                    or any(x in tnorm for x in ["make that", "do that", "maak dat", "die maar", "i'll take", "ill take", "i will take"])
-                ):
-                    st.order.add(st.offered_item_id, int(qty))
-                    added_name = st.offered_label or st.menu.display_name(st.offered_item_id)
-                    st.offered_item_id = None
-                    st.offered_label = None
-
-                    await self.clear_thinking(ws)
-
-                    # Do NOT re-ask pickup/name if already known
-                    if st.fulfillment_mode and st.customer_name:
-                        await self._speak(ws, f"Got it — {qty}x {added_name}. {self._say_anything_else()}")
-                        return
-
-                    if not st.fulfillment_mode:
-                        st.pending_fulfillment = True
-                        await self._speak(ws, f"Got it — {qty}x {added_name}. {self._say_pickup_or_delivery()}")
-                        return
-
-                    if st.fulfillment_mode == "pickup" and not st.customer_name:
-                        st.pending_name = True
-                        await self._speak(ws, f"Got it — {qty}x {added_name}. What name should I put the order under?")
-                        return
-
-                    await self._speak(ws, f"Got it — {qty}x {added_name}. {self._say_anything_else()}")
-                    return
-
-            # -------- Pending spice preference --------
-            if st.pending_spice_item_id and st.menu:
-                pref = self._parse_spice_pref(transcript)
-                await self.clear_thinking(ws)
-                if not pref:
-                    msg = "Certainly. Would you like your Butter Chicken mild, medium, or spicy?" if st.lang != "nl" else "Zeker. Wil je de Butter Chicken mild, medium, of pittig?"
-                    await self._speak(ws, msg)
-                    return
-
-                # We don't store spice in order yet (needs order metadata). Just consume.
-                st.pending_spice_item_id = None
-                st.pending_spice_qty = 0
-
-                if st.pending_choice == "nan_variant":
-                    await self._speak(ws, self._naan_optima_prompt(list_mode="short"))
-                    return
-
-                if not st.fulfillment_mode:
-                    st.pending_fulfillment = True
-                    await self._speak(ws, self._say_pickup_or_delivery())
-                    return
-
-                await self._speak(ws, self._say_anything_else())
-                return
-
-            # -------- Pending fulfillment (do NOT re-ask if already set) --------
+            # ==========================================================
+            # 5) Slot handling (Intent-aware, non-greedy)
+            # ==========================================================
+            # Fulfillment slot (now robust against 'bestellen' hallucination)
             if st.pending_fulfillment:
+                if self._is_obvious_out_of_scope(transcript):
+                    await self.clear_thinking(ws)
+                    await self._speak(ws, "I can help with the order — is this for pickup or delivery?")
+                    return
+
                 mode = self._parse_fulfillment(transcript)
+
                 await self.clear_thinking(ws)
                 if not mode:
+                    # Never fall through to LLM while pending fulfillment
                     await self._speak(ws, self._say_pickup_or_delivery())
                     return
 
@@ -896,12 +894,24 @@ class SessionController:
                 await self._speak(ws, msg)
                 return
 
-            # -------- Pending name (do NOT re-ask if already set) --------
+            # Name slot
             if st.pending_name:
                 await self.clear_thinking(ws)
-                if st.customer_name:
-                    st.pending_name = False
-                    await self._speak(ws, self._say_anything_else())
+
+                if self._is_order_summary_query(transcript) and st.menu:
+                    cart = st.order.summary(st.menu) or "Empty"
+                    if st.lang != "nl":
+                        await self._speak(ws, f"Your current order is: {cart}. What name should I put the order under?")
+                    else:
+                        await self._speak(ws, f"Je huidige bestelling is: {cart}. Op welke naam mag ik de bestelling zetten?")
+                    return
+
+                if self._is_obvious_out_of_scope(transcript):
+                    await self._speak(ws, "Before I continue — what name should I put the order under?")
+                    return
+
+                if self._is_refusal_like(transcript):
+                    await self._speak(ws, "No problem. What name should I put the order under?")
                     return
 
                 if not self._looks_like_name_answer(transcript):
@@ -911,118 +921,13 @@ class SessionController:
 
                 st.customer_name = transcript.strip()
                 st.pending_name = False
-
                 msg = f"Thank you, {st.customer_name}. {self._say_anything_else()}" if st.lang != "nl" else f"Dank je, {st.customer_name}. {self._say_anything_else()}"
                 await self._speak(ws, msg)
                 return
 
-            # Lamb dishes question
-            if st.menu and ("lamb dishes" in tnorm or "lamgerechten" in tnorm or tnorm.strip() == "lamb dishes"):
-                picks = self._lamb_top3(st.menu)
-                names = [dn for dn, _iid in picks]
-                await self.clear_thinking(ws)
-                if st.lang == "nl":
-                    msg = "Ik kijk even voor je. " + (f"We hebben bijvoorbeeld {', '.join(names)}. Welke klinkt goed?" if names else "We hebben verschillende lamsgerechten. Welke bedoel je?")
-                else:
-                    msg = "Let me check the menu for you. " + (f"We have a few great lamb dishes like {', '.join(names)}. Do any of those sound good?" if names else "We have a few lamb dishes. Which one are you looking for?")
-                await self._speak(ws, msg)
-                return
-
-            # Spicy question (Optima-style):
-            # - If it's about naan: explain naan isn't spicy + steer to main dish spice, then continue naan prompt
-            # - Else: offer a spicy dish from the menu (metadata if possible), and set offered_item_id
-            if st.menu and self._is_spicy_query(transcript) and not st.pending_choice:
-                await self.clear_thinking(ws)
-
-                # Naan context spicy question
-                if self._looks_like_naan_context(transcript) or st.pending_choice == "nan_variant":
-                    if st.lang == "nl":
-                        info = "Naan is meestal niet pittig. Als je wilt kan ik het hoofdgerecht pittig laten maken."
-                    else:
-                        info = "Naan is usually not spicy. If you want, we can make your main dish spicy."
-                    # If naan is currently being chosen, continue prompt
-                    if st.pending_choice == "nan_variant":
-                        await self._speak(ws, f"{info} {self._naan_optima_prompt(list_mode='short')}")
-                        return
-                    await self._speak(ws, info)
-                    return
-
-                offered = self._set_spicy_offer(st.menu)
-                if offered:
-                    dn, _iid = offered
-                    msg = (f"The spiciest option is usually {dn}. Would you like that?"
-                           if st.lang != "nl"
-                           else f"De pittigste optie is meestal {dn}. Wil je die?")
-                    await self._speak(ws, msg)
-                    return
-
-                # fallback to lamb heuristic if menu did not provide candidates
-                picks = self._lamb_top3(st.menu)
-                if picks:
-                    dn, iid = picks[0]
-                    st.offered_item_id = iid
-                    st.offered_label = dn
-                    msg = (f"One that can be quite spicy: {dn}. Would you like that?"
-                           if st.lang != "nl"
-                           else f"Eentje die best pittig kan zijn: {dn}. Wil je die?")
-                    await self._speak(ws, msg)
-                    return
-
-            # Pending naan choice
-            if st.pending_choice == "nan_variant" and st.menu:
-                qty_hint = _extract_qty_first(transcript, "en") or _extract_qty_first(transcript, "nl")
-                if qty_hint and qty_hint > 0:
-                    st.pending_qty = int(qty_hint)
-
-                if self._is_naan_options_question(transcript):
-                    await self.clear_thinking(ws)
-                    await self._speak(ws, self._naan_optima_prompt(list_mode="few"))
-                    return
-
-                if self._is_spicy_query(transcript):
-                    await self.clear_thinking(ws)
-                    info = (
-                        "Naan is usually not spicy. Garlic can taste more seasoned, but it isn’t really hot."
-                        if st.lang != "nl"
-                        else "Naan is meestal niet pittig. Garlic kan wat kruidiger smaken, maar het is niet echt heet."
-                    )
-                    await self._speak(ws, f"{info} {self._naan_optima_prompt(list_mode='short')}")
-                    return
-
-                variant = _extract_nan_variant_keyword(transcript)
-
-                # If they just said "naan" again, default to plain (Optima behavior)
-                if not variant:
-                    if any(x in tnorm for x in ["naan", "nan", "naam"]):
-                        variant = "plain"
-
-                if not variant:
-                    await self.clear_thinking(ws)
-                    await self._speak(ws, self._naan_optima_prompt(list_mode="short"))
-                    return
-
-                iid = self._find_naan_item_for_variant(st.menu, variant)
-                if not iid:
-                    await self.clear_thinking(ws)
-                    await self._speak(ws, self._naan_optima_prompt(list_mode="short"))
-                    return
-
-                st.order.add(iid, max(1, int(st.pending_qty or 1)))
-                st.pending_choice = None
-                st.pending_qty = 1
-                st.nan_prompt_count = 0
-
-                await self.clear_thinking(ws)
-
-                if not st.fulfillment_mode:
-                    st.pending_fulfillment = True
-                    await self._speak(ws, self._say_pickup_or_delivery())
-                    return
-
-                await self._speak(ws, self._say_anything_else())
-                return
-
-            # Deterministic add logic
+            # ==========================================================
+            # 6) Ordering logic (Deterministic add + naan scoping)
+            # ==========================================================
             add_qty = (_extract_qty_first(transcript, "en") or _extract_qty_first(transcript, "nl") or 1)
             effective_qty = add_qty
 
@@ -1031,23 +936,31 @@ class SessionController:
             added_ids: List[str] = []
 
             if st.menu:
+                if st.tenant_ref == "taj_mahal":
+                    tok = norm_simple(transcript).strip()
+                    if tok in TAJ_EXTRA_ALIASES and TAJ_EXTRA_ALIASES[tok] != "__GLOBAL_ORDER__":
+                        target_name = TAJ_EXTRA_ALIASES[tok].lower()
+                        for _n, iid in st.menu.name_choices:
+                            dn = (st.menu.display_name(iid) or "").lower()
+                            if target_name in dn:
+                                st.order.add(iid, max(1, int(effective_qty or 1)))
+                                added_any = True
+                                added_ids.append(iid)
+                                break
+
                 adds = parse_add_item(st.menu, transcript, qty=effective_qty)
 
-                mentions_nan = (" naan " in (" " + tnorm + " ")) or detect_generic_nan_request(transcript)
-                variant = _extract_nan_variant_keyword(transcript)
+                mentions_nan = (" naan " in (" " + norm_simple(transcript) + " ")) or detect_generic_nan_request(transcript)
+                variant = _extract_nan_variant_keyword_scoped(transcript)
                 has_variant = bool(variant)
 
                 naan_opts = self._naan_options_from_menu(st.menu)
-                naan_ambiguous = len(naan_opts) >= 2
+                logger.info(
+                    "naan_check mentions_nan=%s has_variant=%s variant=%s naan_opts=%d opts=%s",
+                    mentions_nan, has_variant, variant, len(naan_opts), [x[0] for x in naan_opts[:5]],
+                )
 
-                if self._is_naan_options_question(transcript):
-                    await self.clear_thinking(ws)
-                    await self._speak(ws, self._naan_optima_prompt(list_mode="few"))
-                    return
-
-                # If generic "naan" and menu has multiple, ask short prompt (plain/garlic)
-                if mentions_nan and naan_ambiguous and (not has_variant):
-                    # add non-naan hits first
+                if mentions_nan and (not has_variant):
                     non_nan_hits: List[Tuple[str, int]] = []
                     for item_id, qty in adds:
                         if not self._is_nan_item(st.menu, item_id):
@@ -1062,30 +975,19 @@ class SessionController:
                     st.pending_qty = max(1, int(effective_qty or 1))
                     st.nan_prompt_count = 0
 
-                    # If butter chicken in same utterance, ask spice first (Optima)
-                    if any(self._is_butter_chicken(st.menu, iid) for iid in added_ids):
-                        st.pending_spice_item_id = next(iid for iid in added_ids if self._is_butter_chicken(st.menu, iid))
-                        st.pending_spice_qty = int(effective_qty or 1)
-                        await self.clear_thinking(ws)
-                        await self._speak(ws, "Certainly. And would you like your Butter Chicken mild or spicy?")
-                        return
-
                     await self.clear_thinking(ws)
-                    await self._speak(ws, self._naan_optima_prompt(list_mode="short"))
+                    await self._speak(ws, self._naan_optima_prompt(list_mode="short", with_main="Butter Chicken" if "butter chicken" in norm_simple(transcript) else None))
                     return
 
-                # If explicit naan variant present, add exactly that naan (and avoid ghost extra generic naan)
-                if mentions_nan and has_variant and st.menu:
+                if mentions_nan and has_variant:
                     iid = self._find_naan_item_for_variant(st.menu, variant or "")
                     if iid:
                         st.order.add(iid, max(1, int(effective_qty or 1)))
                         added_any = True
                         added_ids.append(iid)
-                        # remove duplicate naan hits from parse_add_item
                         adds = [(x, q) for (x, q) in adds if x != iid and not self._is_nan_item(st.menu, x)]
 
                 for item_id, qty in adds:
-                    # avoid adding generic naan again if variant already handled above
                     if mentions_nan and has_variant and self._is_nan_item(st.menu, item_id):
                         continue
                     st.order.add(item_id, qty)
@@ -1094,15 +996,6 @@ class SessionController:
 
             cart_after = st.order.summary(st.menu) if st.menu else ""
             if added_any and st.menu and cart_after and cart_after != (cart_before or ""):
-                # If butter chicken added -> spice flow
-                if any(self._is_butter_chicken(st.menu, iid) for iid in added_ids):
-                    st.pending_spice_item_id = next(iid for iid in added_ids if self._is_butter_chicken(st.menu, iid))
-                    st.pending_spice_qty = int(effective_qty or 1)
-                    await self.clear_thinking(ws)
-                    await self._speak(ws, "Certainly. And would you like your Butter Chicken mild or spicy?")
-                    return
-
-                # Continue fulfillment only if not known
                 await self.clear_thinking(ws)
 
                 if not st.fulfillment_mode:
@@ -1118,7 +1011,9 @@ class SessionController:
                 await self._speak(ws, self._say_anything_else())
                 return
 
-            # LLM fallback
+            # ==========================================================
+            # 7) LLM fallback
+            # ==========================================================
             menu_context = "Menu empty."
             if st.menu:
                 default_items = [st.menu.display_name(iid) for _, iid in st.menu.name_choices[:80]]
@@ -1152,4 +1047,3 @@ class SessionController:
                 pass
         finally:
             st.is_processing = False
-
