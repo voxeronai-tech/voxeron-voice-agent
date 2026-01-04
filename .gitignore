@@ -39,3 +39,6 @@ neon_schema_snapshot.txt
 capture_neon_schema.sh
 list_files.sh
 voxeron-voice-agent/
+
+# prevent accidental tag-name files in repo root
+/v0.*
