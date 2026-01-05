@@ -3,7 +3,6 @@ from __future__ import annotations
 import io
 import json
 import logging
-import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -93,6 +92,25 @@ def _safe_json_loads(s: Any) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _norm_lang(lang: Optional[str]) -> Optional[str]:
+    """
+    Normalize language hints to something we can pass to STT safely.
+
+    OpenAI accepts ISO-like language tags for transcription. We keep this permissive:
+    - 'en', 'nl', 'tr', 'hi', etc.
+    - We also allow short tags like 'en-US' (we'll pass through).
+    """
+    if not lang:
+        return None
+    l = str(lang).strip()
+    if not l:
+        return None
+    # Keep it short-ish and sane
+    if len(l) > 16:
+        return None
+    return l
+
+
 class OpenAIClient:
     def __init__(
         self,
@@ -117,9 +135,20 @@ class OpenAIClient:
         pcm16: bytes,
         lang: Optional[str],
         prompt: Optional[str] = None,
+        *,
+        debug_tag: Optional[str] = None,
     ) -> str:
+        """
+        Transcribe PCM16 audio to text.
+
+        IMPORTANT:
+        - If `lang` is provided, we pass it through as `language` to reduce language drift.
+        - `prompt` is optional and can bias the decoder (use carefully per slot).
+        - `debug_tag` is only for logging to trace which STT path was used.
+        """
         if not pcm16:
             return ""
+
         wav_bytes = pcm16_to_wav(pcm16, self.sample_rate)
         f = io.BytesIO(wav_bytes)
         f.name = "audio.wav"
@@ -129,8 +158,24 @@ class OpenAIClient:
         if prompt:
             kwargs["prompt"] = str(prompt)
 
-        if lang in ("en", "nl", "hi"):
-            kwargs["language"] = lang
+        stt_lang = _norm_lang(lang)
+        if stt_lang:
+            # Make this permissive. The API supports many tags; restricting to a small set
+            # causes silent "no language" behavior and drift.
+            kwargs["language"] = stt_lang
+
+        # Debug log for field validation during RC3
+        try:
+            if debug_tag or stt_lang or prompt:
+                logger.info(
+                    "STT_CALL tag=%s model=%s lang=%s prompt_len=%s",
+                    debug_tag or "",
+                    self.stt_model,
+                    stt_lang or "",
+                    len(prompt) if prompt else 0,
+                )
+        except Exception:
+            pass
 
         resp = await self.sdk.audio.transcriptions.create(**kwargs)
         return (getattr(resp, "text", "") or "").strip()
@@ -270,7 +315,10 @@ MENU_CONTEXT:
                                     "additionalProperties": False,
                                 },
                             },
-                            "category": {"type": ["string", "null"], "enum": [None, "lamb", "chicken", "biryani", "vegetarian"]},
+                            "category": {
+                                "type": ["string", "null"],
+                                "enum": [None, "lamb", "chicken", "biryani", "vegetarian"],
+                            },
                             "reply": {"type": ["string", "null"]},
                         },
                         "required": ["intent", "confidence", "items", "category", "reply"],
@@ -351,4 +399,3 @@ MENU_CONTEXT:
             confidence=conf,
             raw=raw_obj,
         )
-

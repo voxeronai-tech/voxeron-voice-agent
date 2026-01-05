@@ -439,7 +439,27 @@ async def _handle_ws(ws: WebSocket) -> None:
 
     try:
         while True:
-            msg = await ws.receive()
+            # ✅ Robust disconnect handling: Starlette can either raise WebSocketDisconnect,
+            # or return a disconnect frame, and/or raise RuntimeError if receive() is called
+            # after a disconnect message has been processed.
+            try:
+                msg = await ws.receive()
+            except WebSocketDisconnect:
+                logger.info("ws disconnect (WebSocketDisconnect) — exiting loop")
+                break
+            except RuntimeError as e:
+                if 'Cannot call "receive" once a disconnect message has been received' in str(e):
+                    logger.info("ws disconnect (runtime after disconnect) — exiting loop")
+                    break
+                raise
+
+            if not msg:
+                logger.info("ws receive returned empty message — exiting loop")
+                break
+
+            if msg.get("type") == "websocket.disconnect":
+                logger.info("ws disconnect frame — exiting loop")
+                break
 
             if msg.get("text") is not None:
                 try:
@@ -488,8 +508,6 @@ async def _handle_ws(ws: WebSocket) -> None:
 
                 state.proc_task = asyncio.create_task(controller.process_utterance(ws, utter))
 
-    except WebSocketDisconnect:
-        pass
     except Exception as e:
         logger.exception("ws loop error: %s", e)
     finally:
@@ -522,4 +540,3 @@ async def ws_pcm(ws: WebSocket) -> None:
 @app.websocket("/ws")
 async def ws_alias(ws: WebSocket) -> None:
     await _handle_ws(ws)
-

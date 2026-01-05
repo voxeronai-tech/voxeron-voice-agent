@@ -1,6 +1,6 @@
 {
   "gates": {
-    "naam_to_naan": true
+    "naam_to_naan": false
   },
   "patterns": {
     "*": [
