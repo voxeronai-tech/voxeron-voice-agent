@@ -20,7 +20,7 @@ Purpose of this file:
 
 ## 2. Release roadmap – v0.7.3 (Sprint 1)
 
-### RC1-1 – ParserResult typed contract
+### RC1-1 – ParserResult typed contract ✅ **DONE**
 **Goal**: Shared deterministic parser contract usable by orchestrator and session controller.
 
 Scope:
@@ -41,7 +41,7 @@ Acceptance:
 
 ---
 
-### RC1-2 – Deterministic-first flow in CognitiveOrchestrator
+### RC1-2 – Deterministic-first flow in CognitiveOrchestrator **IN PROGRESS**
 **Goal**: Parser must always run before any LLM call.
 
 Rules:
