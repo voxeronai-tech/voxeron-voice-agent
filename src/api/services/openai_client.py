@@ -11,6 +11,8 @@ from openai import AsyncOpenAI
 
 from .audio import pcm16_to_wav
 
+from src.api.intent import norm_simple 
+
 logger = logging.getLogger("taj-agent")
 
 
@@ -226,19 +228,51 @@ class OpenAIClient:
     # -------------------------
     # OPTIONAL: ultra-fast intent helpers (no LLM)
     # -------------------------
+    from src.api.intent import norm_simple  # add at top of file if not already imported
+
     def fast_yes_no(self, text: str) -> Optional[str]:
         """
-        Returns 'AFFIRM'/'NEGATE' for ultra-short exact responses, else None.
-        This is optional sugar for SessionController; safe to ignore.
+        Returns 'AFFIRM'/'NEGATE' for short confirmations, else None.
+        Must be robust to punctuation and common confirmation phrases.
         """
         t = (text or "").strip().lower()
         if not t:
             return None
-        # keep this deliberately tiny (fast-path)
-        if t in {"yes", "yeah", "yep", "ok", "okay", "sure", "ja", "prima", "oke"}:
+
+        # Strip common trailing punctuation produced by STT (e.g. "Yes.")
+        t = t.strip(" \t\r\n.!?,'\";:()[]{}")
+
+        # Fast exact matches
+        if t in {"yes", "yeah", "yep", "ok", "okay", "sure", "ja", "jawel", "prima", "oke", "correct"}:
             return "AFFIRM"
-        if t in {"no", "nope", "nee"}:
+        if t in {"no", "nope", "nee", "neen", "nah"}:
             return "NEGATE"
+
+        # Short phrase matches (common in your traces)
+        # Keep these conservative (confirmation-only)
+        if t in {
+            "that is correct",
+            "thats correct",
+            "that's correct",
+            "this is correct",
+            "dat is correct",
+            "dat klopt",
+            "klopt",
+            "helemaal goed",
+        }:
+            return "AFFIRM"
+
+        if t in {
+            "that is not correct",
+            "thats not correct",
+            "that's not correct",
+            "dat klopt niet",
+            "niet correct",
+            "klopt niet"
+            "dat is niet goed",
+        }:
+            return "NEGATE"
+
         return None
 
     # -------------------------
