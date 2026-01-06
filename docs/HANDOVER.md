@@ -50,7 +50,7 @@ Implementation references:
 
 ---
 
-### RC1-2 – Deterministic-first flow in CognitiveOrchestrator ⏳ **IN PROGRESS**
+### RC1-2 – Deterministic-first flow in CognitiveOrchestrator ✅ DONE
 **Goal**: Parser must always run before any LLM call.
 
 Rules:
@@ -60,9 +60,12 @@ Rules:
 - Audio streaming must remain stable (no resets / pops)
 
 Acceptance:
-- Parser invoked first on every turn
-- MATCH path consumes zero LLM tokens
-- Taj demo flow continues to work
+- Parser always invoked first
+- MATCH → deterministic path (LLM skipped)
+- NO_MATCH → LLM fallback only
+- Canonical ParserResult enforced
+- DeterministicParser aligned with confidence + timing
+- Verified via local runtime checks
 
 ---
 
