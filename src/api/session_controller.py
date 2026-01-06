@@ -964,7 +964,13 @@ class SessionController:
 
         snap: Optional[MenuSnapshot] = None
         if self.menu_store:
-            snap = await self.menu_store.get_snapshot(tenant_ref, lang="en")
+            try:
+                snap = await self.menu_store.get_snapshot(tenant_ref, lang="en")
+            except Exception as e:
+                # Never let DB/menu issues crash the audio pipeline.
+                # Hot-swap failures should degrade gracefully (stay alive, allow retry).
+                logger.exception("[tenant] get_snapshot failed tenant=%s: %s", tenant_ref, e)
+                snap = None
         st.menu = snap
         if snap:
             st.tenant_id = snap.tenant_id
