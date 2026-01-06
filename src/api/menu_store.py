@@ -4,7 +4,6 @@ from __future__ import annotations
 import logging
 import os
 import time
-import asyncpg
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -94,57 +93,7 @@ class MenuStore:
         await db.connect()
         assert db.pool is not None
 
-        async def _load_with_conn(conn) -> Optional[MenuSnapshot]:
-
-            # --- Retry-once acquire wrapper (Neon/serverless can drop idle connections) ---
-        last_exc: Optional[BaseException] = None
-        for attempt in (1, 2):
-            try:
-                async with db.pool.acquire() as conn:
-                    snap = await _load_with_conn(conn)
-
-                    # If tenant not found, cache negative result briefly
-                    if snap is None:
-                        return None
-
-                    # Continue building snapshot using the SAME conn below (existing code)
-                    break
-            except (
-                asyncpg.exceptions.ConnectionDoesNotExistError,
-                asyncpg.PostgresConnectionError,
-                ConnectionResetError,
-                OSError,
-            ) as e:
-                last_exc = e
-                logger.warning("MenuStore.get_snapshot transient DB error (attempt %s/2): %s", attempt, e)
-                try:
-                    await db.reconnect()
-                except Exception as e2:
-                    logger.warning("DB reconnect failed: %s", e2)
-                continue
-
-        if last_exc and attempt == 2:
-            logger.error("MenuStore.get_snapshot failed after retry: %s", last_exc)
-            return None
-
-            rows = await conn.fetch(
-                f"""
-                SELECT
-                    item_id,
-                    {name_col} AS name,
-                    {desc_col} AS description,
-                    price_pickup,
-                    price_delivery,
-                    category_id,
-                    is_available,
-                    tags,
-                    customizable_spice,
-                    default_spice_level
-                FROM {self.schema}.menu_items
-                WHERE tenant_id = $1 AND is_available = TRUE
-                """,
-                snap.tenant_id,
-            )
+        async with db.pool.acquire() as conn:
             tenant = await conn.fetchrow(
                 f"""
                 SELECT tenant_id, name, default_language
