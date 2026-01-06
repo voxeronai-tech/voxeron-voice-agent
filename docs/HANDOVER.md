@@ -1,6 +1,6 @@
 # VOXERON – ACTIVE HANDOVER
 
-Last updated: 2026-01-05
+Last updated: 2026-01-06
 Release target: **v0.7.3**
 Active milestone: **RC1-3 – Deterministic Parsing MVP**
 
@@ -12,6 +12,7 @@ Active milestone: **RC1-3 – Deterministic Parsing MVP**
 - Primary development branch: `feature/sprint-1-orchestrator-parser`
 - Last released stable tag: `v0.7.2-rc2-impl`
 - RC3 stabilization decision: SessionController reverted to known-good v12 implementation
+- RC1-3 start tag: v0.7.3-rc1-3-start
 
 Purpose of this file:
 > This document is the **single handover artifact** for continuing work in a new chat. Chat memory is not authoritative. Git + this file are.
@@ -23,25 +24,33 @@ Purpose of this file:
 ### RC1-1 – ParserResult typed contract ✅ **DONE**
 **Goal**: Shared deterministic parser contract usable by orchestrator and session controller.
 
-Scope:
-- Typed `ParserResult` (dataclass or pydantic)
-- Enums: `ParserStatus`, `ReasonCode`
+Delivered:
+- Canonical typed contract: `src/api/parser/types.py`
+- Backward-compatible re-export: `src/api/orchestrator/parser_types.py`
+- Enums:
+  - `ParserStatus` (MATCH / NO_MATCH / PARTIAL / AMBIGUOUS)
+  - `ReasonCode`
 - Fields include:
   - `status`
-  - `matched_entity`
-  - `quantity`
-  - `confidence`
   - `reason_code`
+  - `matched_entity`
+  - `confidence`
   - `execution_time_ms`
+- Unit tests:
+  - `tests/unit/test_parser_result.py`
 
 Acceptance:
 - Matches blueprint v0.7.1
 - `execution_time_ms` measured per invocation
 - Unit tests cover: MATCH / NO_MATCH / PARTIAL / AMBIGUOUS
 
+Implementation references:
+- Branch: `fix/rc1-1-parserresult-contract`
+- Merged into main: commit `aeeb9d4`
+
 ---
 
-### RC1-2 – Deterministic-first flow in CognitiveOrchestrator **IN PROGRESS**
+### RC1-2 – Deterministic-first flow in CognitiveOrchestrator ⏳ **IN PROGRESS**
 **Goal**: Parser must always run before any LLM call.
 
 Rules:
@@ -57,7 +66,7 @@ Acceptance:
 
 ---
 
-### RC1-3 – DeterministicParser MVP (alias + quantity)
+### RC1-3 – DeterministicParser MVP (alias + quantity) ⏳ **PENDING**
 **Goal**: Minimal deterministic parser that handles core ordering reliably.
 
 Capabilities:
@@ -135,6 +144,7 @@ Examples:
 - `v0.7.3-rc1-3-complete`
 
 ---
+
 
 ## 6. How to resume work in a NEW CHAT
 
