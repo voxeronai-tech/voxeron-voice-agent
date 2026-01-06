@@ -47,6 +47,28 @@ class DeterministicParser:
                     execution_time_ms=round((time.perf_counter() - t0) * 1000.0, 3),
                 )
 
+            # RC1-3: deterministic quantity/update intent (no LLM)
+            # Only trigger when update markers are present to avoid hijacking normal ordering.
+            from src.api.parser.quantity import extract_quantity_1_to_10
+
+            qty = extract_quantity_1_to_10(utterance)
+            if qty is not None:
+                t = (utterance or '').lower()
+                update_markers = (
+                    # EN
+                    'make it', 'change to', 'instead of', 'rather than',
+                    # NL
+                    'maak het', 'maak er', 'doe er', 'in plaats van',
+                )
+                if any(m in t for m in update_markers):
+                    return ParserResult(
+                        status=ParserStatus.MATCH,
+                        reason_code=ReasonCode.OK,
+                        matched_entity={'action': 'SET_QTY', 'quantity': qty},
+                        confidence=1.0,
+                        execution_time_ms=round((time.perf_counter() - t0) * 1000.0, 3),
+                    )
+
             return ParserResult(
                 status=ParserStatus.NO_MATCH,
                 reason_code=ReasonCode.NO_ALIAS,
