@@ -2,14 +2,15 @@
 from __future__ import annotations
 
 import logging
-logger = logging.getLogger("taj-agent")
-
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Dict, Optional
 
 from .deterministic_parser import DeterministicParser
 from src.api.parser.types import ParserResult, ParserStatus
+
+logger = logging.getLogger("taj-agent")
+
 
 class OrchestratorRoute(str, Enum):
     DETERMINISTIC = "deterministic"
@@ -22,9 +23,10 @@ class OrchestratorDecision:
     parser_result: ParserResult
     response_text: Optional[str] = None
 
+
 class CognitiveOrchestrator:
     """
-    Sprint-1 Orchestrator (RC3 hardened):
+    Sprint-1 Orchestrator (RC1-2):
       - parser runs BEFORE any LLM call
       - MATCH -> deterministic response path (skip LLM)
       - NO_MATCH -> agent path (LLM)
@@ -44,22 +46,20 @@ class CognitiveOrchestrator:
 
         if pr.status == ParserStatus.MATCH:
             logger.info(
-            "RC1-2: MATCH => deterministic route (skip LLM). exec_ms=%.2f",
-            pr.execution_time_ms,
-        )
+                "RC1-2: MATCH => deterministic route (skip LLM). exec_ms=%.2f",
+                pr.execution_time_ms,
+            )
             txt = self._responder(pr)
             return OrchestratorDecision(
                 route=OrchestratorRoute.DETERMINISTIC,
                 parser_result=pr,
                 response_text=txt,
-                matched_kind=getattr(pr, "matched_kind", MatchKind.ENTITY),
-                matched_entity=getattr(pr, "matched_entity", None),
-                matched_value=getattr(pr, "matched_value", None),
             )
+
         logger.info(
             "RC1-2: %s => agent fallback (LLM allowed). exec_ms=%.2f",
             pr.status,
-            pr.execution_time_ms, 
+            pr.execution_time_ms,
         )
         return OrchestratorDecision(
             route=OrchestratorRoute.AGENT,
@@ -69,7 +69,5 @@ class CognitiveOrchestrator:
 
     @staticmethod
     def _default_responder(pr: ParserResult) -> str:
-        # If you start returning INTENT kinds, you can customize response per intent here.
         entity = pr.matched_entity or "that"
         return f"Got it — {entity}."
-
