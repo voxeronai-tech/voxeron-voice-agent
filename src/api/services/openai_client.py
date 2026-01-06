@@ -68,6 +68,9 @@ def _clamp_int(x: Any, lo: int, hi: int, default: int) -> int:
     try:
         v = int(x)
     except Exception:
+        t = (default or "").strip()
+        logger.info("STT_RESULT len=%s text=%r", len(t), t[:120])
+
         return default
     return max(lo, min(hi, v))
 
@@ -174,6 +177,10 @@ class OpenAIClient:
                     stt_lang or "",
                     len(prompt) if prompt else 0,
                 )
+
+                pcm_bytes = len(pcm or b"")
+                est_ms = int((pcm_bytes / 32000.0) * 1000.0) if pcm_bytes else 0
+                logger.info("STT_PCM bytes=%s est_ms=%s", pcm_bytes, est_ms)
         except Exception:
             pass
 
