@@ -871,13 +871,10 @@ class SessionController:
         if decision.route != OrchestratorRoute.DETERMINISTIC:
             return None
 
-        # RC3 safety: only ENTITY matches are addable items.
-        # Prevents future "__INTENT__:" / "__VALUE__:" tokens from being added to cart.
-        if MatchKind is not None and getattr(decision, "matched_kind", None) != MatchKind.ENTITY:
-            return None
-
-        item_id = decision.matched_entity or decision.parser_result.matched_entity
-        if not item_id:
+        # RC1-3 safety: only concrete item IDs (strings) are addable here.
+        # Deterministic payloads (e.g. qty updates) must NOT be added to cart.
+        item_id = decision.parser_result.matched_entity
+        if not isinstance(item_id, str) or not item_id:
             return None
 
         # Add deterministically
