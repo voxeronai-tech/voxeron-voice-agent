@@ -40,6 +40,14 @@ class Database:
             await self.pool.close()
             self.pool = None
 
+    async def reconnect(self):
+        """Hard reset the pool (for transient Neon disconnects)."""
+        try:
+            await self.close()
+        finally:
+            await self.connect()
+
+
     # MENU QUERIES
     async def get_menu_items(self, category_id: Optional[int] = None) -> List[Dict]:
         """Get menu items, optionally filtered by category"""
