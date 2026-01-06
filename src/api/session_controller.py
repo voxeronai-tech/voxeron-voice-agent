@@ -881,6 +881,68 @@ class SessionController:
         self.state.order.add(item_id, max(1, int(qty or 1)))
         return item_id
 
+    def _maybe_orchestrator_apply_qty_update(self, menu: MenuSnapshot, transcript: str) -> Optional[Tuple[str, int]]:
+        """
+        RC1-3: deterministic qty/update intent BEFORE LLM.
+
+        Returns (item_id, new_qty) if applied, else None.
+
+        Conservative target selection:
+          1) if we have a recent last_added item, update that
+          2) else if exactly one item in cart, update that
+          3) else do nothing (let LLM clarify)
+        """
+        if CognitiveOrchestrator is None or OrchestratorRoute is None:
+            return None
+        if not menu:
+            return None
+
+        # Build alias map (kept consistent with _maybe_orchestrator_match_item)
+        alias_map: Dict[str, str] = dict(menu.alias_map or {})
+        if self.state.tenant_ref == "taj_mahal":
+            alias_map.update(self._taj_overlay_alias_map(menu))
+
+        orch = CognitiveOrchestrator(alias_map=alias_map)
+        decision = orch.decide(transcript)
+        if decision.route != OrchestratorRoute.DETERMINISTIC:
+            return None
+
+        payload = decision.parser_result.matched_entity
+        if not (isinstance(payload, dict) and (payload.get("action") == "SET_QTY")):
+            return None
+
+        try:
+            new_qty = int(payload.get("quantity") or 0)
+        except Exception:
+            return None
+        if new_qty <= 0:
+            return None
+
+        st = self.state
+        items = getattr(st.order, "items", None)
+        if not isinstance(items, dict) or not items:
+            return None
+
+        # 1) Prefer last-added item if available
+        try:
+            last_added = getattr(st, "last_added", None)
+            if isinstance(last_added, list) and last_added:
+                iid = last_added[0][0]
+                if isinstance(iid, str) and iid in items:
+                    items[iid] = new_qty
+                    return (iid, new_qty)
+        except Exception:
+            pass
+
+        # 2) If only one item, update it
+        if len(items) == 1:
+            iid = next(iter(items.keys()))
+            if isinstance(iid, str):
+                items[iid] = new_qty
+                return (iid, new_qty)
+
+        return None
+
     async def _load_tenant_context(self, tenant_ref: str) -> None:
         st = self.state
         st.locked_voice = None
@@ -1751,6 +1813,16 @@ class SessionController:
 
                 await self._speak(ws, self._say_anything_else())
                 return
+            # RC1-3: apply deterministic qty updates before LLM
+            if st.menu:
+                applied = self._maybe_orchestrator_apply_qty_update(st.menu, transcript)
+                if applied is not None:
+                    _iid, new_qty = applied
+                    await self.clear_thinking(ws)
+                    msg = f"Got it — quantity set to {new_qty}." if st.lang != "nl" else f"Goed — aantal aangepast naar {new_qty}."
+                    await self._speak(ws, msg)
+                    return
+
             # ==========================================================
             # 7) LLM fallback
             # ==========================================================
