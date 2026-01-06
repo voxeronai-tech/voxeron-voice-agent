@@ -69,7 +69,7 @@ Acceptance:
 
 ---
 
-### RC1-3 – DeterministicParser MVP (alias + quantity) ⏳ **PENDING**
+### RC1-3 – DeterministicParser MVP (alias + quantity) ✅ DONE
 **Goal**: Minimal deterministic parser that handles core ordering reliably.
 
 Capabilities:
@@ -80,6 +80,46 @@ Examples:
 - "two garlic naan" → MATCH (item_id=garlic_naan, qty=2)
 - "make it one naan" → MATCH (update qty=1)
 - Unknown item → NO_MATCH (reason=NO_ALIAS)
+
+Delivered (branch fix/rc1-3-deterministic-parser-mvp):
+
+- Quantity extractor (1–10, EN + NL): src/api/parser/quantity.py
+    - Tests: tests/unit/test_quantity.py
+    - Commit: b55152d
+
+- Taj phonetics gate fix: enable naam_to_naan
+  - File: tenants/taj_mahal/phonetics.json
+  - Commit: 5d3dd47
+
+- DeterministicParser aligned to RC1-2 canonical contract (no legacy MatchKind)
+  - File: src/api/orchestrator/deterministic_parser.py
+  - Commit: 62f5537
+
+- Safety: prevent deterministic payloads from being added to cart in short-utterance add path
+  - File: src/api/session_controller.py
+  - Commit: 458a2a8
+
+- Deterministic qty update parsing (SET_QTY payload)
+  - File: src/api/orchestrator/deterministic_parser.py
+  - Tests: tests/unit/test_deterministic_qty_update.py
+  - Commit: 478bee0
+
+- Deterministic responder safe for payload matches (no dict spoken)
+  - File: src/api/orchestrator/orchestrator.py
+  - Commit: d865c1c
+
+- Wiring: apply deterministic SET_QTY before LLM fallback (conservative targeting: last_added or single-item cart)
+  - File: src/api/session_controller.py
+  - Commit: c6b6dcb
+
+Acceptance:
+- pytest -q green
+- Deterministic SET_QTY is applied before LLM fallback
+- No payload dicts are ever added to cart as item ids
+
+Notes:
+- Orchestrator deterministic add-item hook still runs only for short utterances (≤3 words) to avoid double-add with parse_add_item.
+- Qty updates are wired into the main flow right before LLM fallback.
 
 ---
 
