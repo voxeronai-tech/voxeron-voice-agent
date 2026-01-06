@@ -1210,6 +1210,10 @@ class SessionController:
                 # Retry cap: never get stuck in confirmation loops if STT returns empty/unclear.
                 retries = int(getattr(st, "cart_check_retries", 0) or 0)
 
+                # Always show what STT heard during cart confirmation (helps debugging + UI transcript)
+                logger.info("STT: %s", transcript)
+                await self.send_user_text(ws, transcript)
+
                 yn = self.oa.fast_yes_no(transcript) if hasattr(self.oa, "fast_yes_no") else None
                 if yn == "AFFIRM":
                     st.pending_cart_check = False
