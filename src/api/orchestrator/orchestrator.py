@@ -1,13 +1,15 @@
 # src/api/orchestrator/orchestrator.py
 from __future__ import annotations
 
+import logging
+logger = logging.getLogger("taj-agent")
+
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Dict, Optional
 
 from .deterministic_parser import DeterministicParser
-from .parser_types import ParserResult, ParserStatus, MatchKind
-
+from src.api.parser.types import ParserResult, ParserStatus
 
 class OrchestratorRoute(str, Enum):
     DETERMINISTIC = "deterministic"
@@ -19,12 +21,6 @@ class OrchestratorDecision:
     route: OrchestratorRoute
     parser_result: ParserResult
     response_text: Optional[str] = None
-
-    # convenient mirrors (optional; avoids digging into parser_result all the time)
-    matched_kind: MatchKind = MatchKind.ENTITY
-    matched_entity: Optional[str] = None
-    matched_value: Optional[str] = None
-
 
 class CognitiveOrchestrator:
     """
@@ -47,6 +43,10 @@ class CognitiveOrchestrator:
         pr = self._parser.parse(utterance_text)
 
         if pr.status == ParserStatus.MATCH:
+            logger.info(
+            "RC1-2: MATCH => deterministic route (skip LLM). exec_ms=%.2f",
+            pr.execution_time_ms,
+        )
             txt = self._responder(pr)
             return OrchestratorDecision(
                 route=OrchestratorRoute.DETERMINISTIC,
@@ -56,22 +56,20 @@ class CognitiveOrchestrator:
                 matched_entity=getattr(pr, "matched_entity", None),
                 matched_value=getattr(pr, "matched_value", None),
             )
-
+        logger.info(
+            "RC1-2: %s => agent fallback (LLM allowed). exec_ms=%.2f",
+            pr.status,
+            pr.execution_time_ms, 
+        )
         return OrchestratorDecision(
             route=OrchestratorRoute.AGENT,
             parser_result=pr,
             response_text=None,
-            matched_kind=getattr(pr, "matched_kind", MatchKind.ENTITY),
-            matched_entity=None,
-            matched_value=None,
         )
 
     @staticmethod
     def _default_responder(pr: ParserResult) -> str:
         # If you start returning INTENT kinds, you can customize response per intent here.
-        if getattr(pr, "matched_kind", MatchKind.ENTITY) == MatchKind.INTENT:
-            val = getattr(pr, "matched_value", None) or "that"
-            return f"Got it — {val}."
         entity = pr.matched_entity or "that"
         return f"Got it — {entity}."
 
