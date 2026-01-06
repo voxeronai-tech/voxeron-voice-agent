@@ -1276,10 +1276,13 @@ class SessionController:
             transcript = transcript.strip()
             # RC3: if output language is locked to English, normalize common Dutch "that's all" phrases
             # that STT may produce from accented English ("that'll be all" -> "dat zal alles zijn").
+            # Common NL bleed artifacts when user speaks English with accent
             if st.lang == "en":
                 transcript = re.sub(r"\bdat zal( alles)? zijn\b", "that'll be all", transcript, flags=re.IGNORECASE)
                 transcript = re.sub(r"\bdat zal het zijn\b", "that'll be all", transcript, flags=re.IGNORECASE)
                 transcript = re.sub(r"\bdat zal alles zijn\b", "that'll be all", transcript, flags=re.IGNORECASE)
+                transcript = re.sub(r"\ben\b", "and", transcript, flags=re.IGNORECASE)
+                transcript = re.sub(r"\bdoe\b", "two", transcript, flags=re.IGNORECASE)
 
             # RC3: acoustic alias for Dutch 'lam' -> 'lamb' to improve deterministic matching.
             transcript = re.sub(r"\blam\b", "lamb", transcript, flags=re.IGNORECASE)
