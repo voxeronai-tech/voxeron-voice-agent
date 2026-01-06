@@ -178,14 +178,23 @@ class OpenAIClient:
                     len(prompt) if prompt else 0,
                 )
 
-                pcm_bytes = len(pcm or b"")
+                pcm_bytes = len(pcm16 or b"")
                 est_ms = int((pcm_bytes / 32000.0) * 1000.0) if pcm_bytes else 0
                 logger.info("STT_PCM bytes=%s est_ms=%s", pcm_bytes, est_ms)
         except Exception:
             pass
 
         resp = await self.sdk.audio.transcriptions.create(**kwargs)
-        return (getattr(resp, "text", "") or "").strip()
+        text = (getattr(resp, "text", "") or "").strip()
+
+        # Debug log for result visibility during RC3/RC1-3 testing
+        try:
+            if debug_tag or stt_lang or prompt:
+                logger.info("STT_RESULT len=%s text=%r", len(text), text[:120])
+        except Exception:
+            pass
+
+        return text
 
     # -------------------------
     # Chat (freeform)
