@@ -1201,15 +1201,20 @@ class SessionController:
 
             # Optima-style cart check confirmation
             if getattr(st, "pending_cart_check", False):
+                # Retry cap: never get stuck in confirmation loops if STT returns empty/unclear.
+                retries = int(getattr(st, "cart_check_retries", 0) or 0)
+
                 yn = self.oa.fast_yes_no(transcript) if hasattr(self.oa, "fast_yes_no") else None
                 if yn == "AFFIRM":
                     st.pending_cart_check = False
                     st.cart_check_snapshot = None
+                    st.cart_check_retries = 0
                     await self.clear_thinking(ws)
                     await self._speak(ws, self._say_anything_else())
                     return
                 if yn == "NEGATE":
                     st.pending_cart_check = False
+                    st.cart_check_retries = 0
                     await self.clear_thinking(ws)
                     await self._speak(
                         ws,
@@ -1218,9 +1223,31 @@ class SessionController:
                         else "Geen probleem. Wat wil je aanpassen?",
                     )
                     return
-                # unclear response, re-ask quickly
+
+                # Empty or unclear -> retry with escalating prompt
+                retries += 1
+                st.cart_check_retries = retries
+
                 cart = st.cart_check_snapshot or (st.order.summary(st.menu) if st.menu else "")
                 await self.clear_thinking(ws)
+
+                if retries >= 3:
+                    # Give up on explicit confirmation; continue the flow safely.
+                    st.pending_cart_check = False
+                    st.cart_check_snapshot = None
+                    st.cart_check_retries = 0
+                    if not st.fulfillment_mode:
+                        st.pending_fulfillment = True
+                        await self._speak(ws, self._say_pickup_or_delivery())
+                    else:
+                        await self._speak(ws, self._say_anything_else())
+                    return
+
+                if retries == 2:
+                    msg = "Please say yes or no." if st.lang != "nl" else "Zeg alsjeblieft ja of nee."
+                    await self._speak(ws, msg)
+                    return
+
                 await self._speak(
                     ws,
                     f"Sorry, just to confirm: {cart}. Is that correct?"
