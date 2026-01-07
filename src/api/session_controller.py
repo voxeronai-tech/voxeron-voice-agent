@@ -349,16 +349,22 @@ def build_llm_messages(state: SessionState, user_text: str, menu_context: str) -
         + f"\nCURRENT_CART: [{cart_str}]"
         + f"\nMENU_CONTEXT:\n{menu_context}"
     )
+
+    # RC3: enforce output language when language is locked (prevents NL drift on "ja/maak het")
+    if getattr(state, "lang_locked", False):
+        if getattr(state, "lang", "en") == "nl":
+            sys += "\n\nOUTPUT_LANGUAGE: nl\nReturn the reply in Dutch only. Do not switch languages."
+        else:
+            sys += "\n\nOUTPUT_LANGUAGE: en\nReturn the reply in English only. Do not switch languages."
+
     sys = _policy_guard_append(state, sys)
     return [{"role": "system", "content": sys}, {"role": "user", "content": user_text}]
-
 
 async def llm_turn(oa: OpenAIClient, state: SessionState, user_text: str, menu_context: str) -> Dict[str, Any]:
     msgs = build_llm_messages(state, user_text, menu_context)
     txt = await oa.chat(msgs, temperature=0.2)
     obj = _safe_json_loads(txt)
     return obj if obj else {"reply": txt, "add": [], "remove": []}
-
 
 # -------------------------
 # Naan keyword parsing (SCOPED)
@@ -613,8 +619,6 @@ class SessionController:
                 if len(words) > len(p_words):
                     return " ".join(words[len(p_words):]).strip(" .,")
         return t.strip(" .,")
-
-
 
     def _looks_like_name_answer(self, text: str) -> bool:
         t_raw = (text or "").strip()
