@@ -1009,7 +1009,17 @@ class SessionController:
             logger.exception("[offer] capture failed")
 
         await self.send_agent_text(ws, text)
-        await self.stream_tts_mp3(ws, text)
+        try:
+            await self.stream_tts_mp3(ws, text)
+        except Exception as e:
+            # RC3: never let TTS failures crash the session
+            logger.exception("RC3: TTS failed (continuing without audio)")
+
+            # ensure we don't stay in a bad speaking state
+            try:
+                await self.clear_thinking(ws)
+            except Exception:
+                pass
 
     async def stream_tts_mp3(self, ws: WebSocket, text: str) -> None:
         st = self.state
