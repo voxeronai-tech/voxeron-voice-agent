@@ -1813,8 +1813,11 @@ class SessionController:
                 # --- RC3: handle split edits like "one plain naan and one garlic naan" deterministically ---
                 t_low = (transcript or "").lower()
                 if st.menu and ("naan" in t_low or "nan" in t_low or "naam" in t_low):
-                    has_plain = any(x in t_low for x in ["plain", "regular", "normal", "gewoon", "normaal", "standaard"])
+                    has_plain_word = any(x in t_low for x in ["plain", "regular", "normal", "gewoon", "normaal", "standaard"])
                     has_garlic = ("garlic" in t_low) or ("knoflook" in t_low)
+
+                    # If user says "one naan and one garlic naan", treat the first "naan" as plain/default naan.
+                    has_plain = has_plain_word or ((" one naan" in t_low or " 1 naan" in t_low or " one nan" in t_low or " 1 nan" in t_low) and has_garlic)
 
                     # Only trigger on true split intent (both variants mentioned)
                     if has_plain and has_garlic:
@@ -1851,7 +1854,7 @@ class SessionController:
 
                 # --- RC fix: handle naan quantity UPDATE without re-entering variant slot ---
                 t_low = (transcript or "").lower()
-                if st.menu and (" naan" in t_low or "nan" in t_low) and any(m in t_low for m in ("instead of", "make it", "change to", "in plaats van", "doe er", "maak er", "maak het")):
+                if st.menu and (" naan" in t_low or "nan" in t_low) and any(m in t_low for m in ("instead of", "make it", "change", "change to", "into", "in plaats van", "doe er", "maak er", "maak het")):
                     from src.api.parser.quantity import extract_quantity_1_to_10
                     new_qty = extract_quantity_1_to_10(transcript)
                     if isinstance(new_qty, int) and new_qty >= 1:
