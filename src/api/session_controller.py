@@ -376,7 +376,6 @@ _PLAIN_LIKE = {
 }
 _VARIANT_TOKS = {
     "garlic": {"garlic", "knoflook"},
-    "butter": {"butter", "boter"},
     "cheese": {"cheese", "kaas"},
     "keema": {"keema", "kheema"},
     "peshawari": {"peshawari"},
