@@ -1811,6 +1811,45 @@ class SessionController:
                     adds = parse_add_item(st.menu, transcript, qty=effective_qty)
 
                 # Naan detection (generic + explicit mentions)
+                # --- RC3: handle split edits like "one plain naan and one garlic naan" deterministically ---
+                t_low = (transcript or "").lower()
+                if st.menu and ("naan" in t_low or "nan" in t_low or "naam" in t_low):
+                    has_plain = any(x in t_low for x in ["plain", "regular", "normal", "gewoon", "normaal", "standaard"])
+                    has_garlic = ("garlic" in t_low) or ("knoflook" in t_low)
+
+                    # Only trigger on true split intent (both variants mentioned)
+                    if has_plain and has_garlic:
+                        plain_iid = self._find_naan_item_for_variant(st.menu, "plain")
+                        garlic_iid = self._find_naan_item_for_variant(st.menu, "garlic")
+
+                        if plain_iid and garlic_iid and plain_iid != garlic_iid:
+                            # Set split quantities. Keep it minimal: default 1 each.
+                            # (We can refine per-variant qty parsing later if needed.)
+                            st.order.set_qty(plain_iid, 1)
+                            st.order.set_qty(garlic_iid, 1)
+
+                            # Remove any other naan ids to avoid "2x Nan" leftovers
+                            for iid in list((st.order.items or {}).keys()):
+                                if self._is_nan_item(st.menu, iid) and iid not in (plain_iid, garlic_iid):
+                                    st.order.items.pop(iid, None)
+
+                            # Clear naan slot state and confirm cart
+                            st.pending_choice = None
+                            st.pending_qty = 1
+                            st.nan_prompt_count = 0
+                            await self.clear_thinking(ws)
+
+                            cart = st.order.summary(st.menu) if st.menu else ""
+                            st.pending_cart_check = True
+                            st.cart_check_snapshot = cart
+                            await self._speak(
+                                ws,
+                                f"Okay, so that's {cart}. Is that correct?"
+                                if st.lang != "nl"
+                                else f"Oké, dus dat is: {cart}. Klopt dat?",
+                            )
+                            return
+
                 # --- RC fix: handle naan quantity UPDATE without re-entering variant slot ---
                 t_low = (transcript or "").lower()
                 if st.menu and (" naan" in t_low or "nan" in t_low) and any(m in t_low for m in ("instead of", "make it", "change to", "in plaats van", "doe er", "maak er", "maak het")):
