@@ -83,43 +83,31 @@ Examples:
 
 Delivered (branch fix/rc1-3-deterministic-parser-mvp):
 
-- Quantity extractor (1–10, EN + NL): src/api/parser/quantity.py
-    - Tests: tests/unit/test_quantity.py
-    - Commit: b55152d
+**Original scope (Issue #3)**  
+Implement a minimal deterministic parser with:
+- Alias lookup via `MenuSnapshot` / DB
+- Quantity extraction (1–10, EN + NL)
+- Canonical `ParserResult` output (MATCH / NO_MATCH / PARTIAL)
 
-- Taj phonetics gate fix: enable naam_to_naan
-  - File: tenants/taj_mahal/phonetics.json
-  - Commit: 5d3dd47
+**Acceptance criteria – ALL MET**
+- “two garlic naan” → MATCH (item_id + qty=2)
+- “make it one naan” → MATCH (SET_QTY = 1)
+- Unknown item → NO_MATCH (NO_ALIAS)
+- `pytest -q` green
 
-- DeterministicParser aligned to RC1-2 canonical contract (no legacy MatchKind)
-  - File: src/api/orchestrator/deterministic_parser.py
-  - Commit: 62f5537
+**Implementation (branch `fix/rc1-3-deterministic-parser-mvp`)**
+- Quantity extractor: `src/api/parser/quantity.py`
+- Deterministic alias + qty parser: `src/api/orchestrator/deterministic_parser.py`
+- Deterministic SET_QTY wiring before LLM fallback
+- Safety guards preventing payload dicts from entering cart
+- Taj phonetics fix (`naam → naan`)
 
-- Safety: prevent deterministic payloads from being added to cart in short-utterance add path
-  - File: src/api/session_controller.py
-  - Commit: 458a2a8
+**Release anchors**
+- Start tag: `v0.7.3-rc1-3-start`
+- Completion tag: **`v0.7.3-rc1-3-complete`** ✅  
+  (tag exists locally and on origin)
 
-- Deterministic qty update parsing (SET_QTY payload)
-  - File: src/api/orchestrator/deterministic_parser.py
-  - Tests: tests/unit/test_deterministic_qty_update.py
-  - Commit: 478bee0
-
-- Deterministic responder safe for payload matches (no dict spoken)
-  - File: src/api/orchestrator/orchestrator.py
-  - Commit: d865c1c
-
-- Wiring: apply deterministic SET_QTY before LLM fallback (conservative targeting: last_added or single-item cart)
-  - File: src/api/session_controller.py
-  - Commit: c6b6dcb
-
-Acceptance:
-- pytest -q green
-- Deterministic SET_QTY is applied before LLM fallback
-- No payload dicts are ever added to cart as item ids
-
-Notes:
-- Orchestrator deterministic add-item hook still runs only for short utterances (≤3 words) to avoid double-add with parse_add_item.
-- Qty updates are wired into the main flow right before LLM fallback.
+> 🔒 **RC1-3 is closed. No further changes are allowed on this scope.**
 
 ---
 
@@ -134,81 +122,79 @@ These issues are **not** to be worked on until RC1-3 is complete:
 
 ---
 
-## 3. Current implementation status
+## 3. Post-RC1-3 work: RC3 Session Stability (ACTIVE)
 
-### SessionController (CRITICAL STABILITY DECISION)
+RC3 is **explicitly out of RC1-3 scope** and exists to stabilize
+real-world conversation behavior in the `SessionController`.
 
-- `session_controller.py` was refactored aggressively during RC3
-- Resulting v13 behavior caused regressions (confirmation loops, language drift)
-- Decision made to **stabilize RC3 using known-good v12 implementation**
+### Active RC3 branch
+- Branch: `fix/rc3-closeout-session-stability`
+- Status: **WIP**
+- Type: behavioral stabilization only
 
-Authoritative baseline:
-- `session_controller_rc3_ready_v12.py` (manually restored and committed)
+### Problems being addressed
+- Confirmation loops (“Please say yes or no” dead-ends)
+- Mixed affirm/negate utterances (“No, I want …”)
+- Language instability (accidental NL/DE token drift)
+- Over-eager clarification questions (e.g. naan variants when unambiguous)
+- Spurious LLM menu enumerations after NEGATE
 
-Rule:
-> No further large SessionController refactors until RC1-3 is fully delivered.
+### Hard constraints for RC3
+- ❌ No parser changes
+- ❌ No orchestrator refactors
+- ❌ No new deterministic capabilities
+- ✅ SessionController logic only
+- ✅ Incremental, reviewable fixes only
+
+### Baseline rule
+- Known-good baseline: **SessionController v12**
+- RC3 changes are *surgical deltas*, not rewrites
 
 ---
 
-### Orchestrator / Parser state
+## 4. Branching & workflow rules (MANDATORY)
 
-- Orchestrator hook exists but must be aligned with RC1-1 contract
-- Deterministic alias parsing exists but not yet formalized as `ParserResult`
-- Folder structure may differ from issue suggestions; behavior > location
-
----
-
-## 4. Branching and workflow rules (MANDATORY)
-
-- One RC issue = one branch
+- One issue = one branch
 - One concern = one commit
 - No large file rewrites in chat
-- Chat must never invent roadmap or scope
+- No scope invention
+- RC1-3 code must never be amended
 
-Branch naming:
-- `fix/rc1-1-parserresult-contract`
-- `fix/rc1-2-orchestrator-deterministic-first`
-- `fix/rc1-3-deterministic-parser-mvp`
+**Active branches**
+- `feature/sprint-1-orchestrator-parser` (integration)
+- `fix/rc1-3-deterministic-parser-mvp` (closed)
+- `fix/rc3-closeout-session-stability` (active)
 
-Commit messages MUST reference RC issue:
-```
-RC1-3: deterministic parser alias + qty MVP
-```
+**Commit message format**
+RC3: <concise behavioral fix>
 
----
-
-## 5. Tags as memory anchors
-
-Tags are used to anchor progress independently of chat context.
-
-Examples:
-- `v0.7.3-rc1-3-start`
-- `rc3-session-v12-stable`
-- `v0.7.3-rc1-3-complete`
+yaml
+Copy code
 
 ---
 
+## 5. Explicitly OUT OF SCOPE (until RC3 is closed)
 
-## 6. How to resume work in a NEW CHAT
+- RC1-4 TelemetryEmitter
+- RC1-5 Redis SessionState shadow writes
+- RC1-6 WebSocket lifecycle cleanup
+- RC1-7 Deterministic vs fallback E2E harness
+- Any new language detection logic
+- Any new intent parsing logic
 
-In a new chat, do NOT explain history manually.
+---
 
-Instead:
+## 6. How to continue in a NEW CHAT
 
-1. Run locally:
+Do **not** re-explain history manually.
+
+### Step 1 – Local context
 ```bash
 git clone https://github.com/voxeronai-tech/voxeron-voice-agent.git
 cd voxeron-voice-agent
 git checkout feature/sprint-1-orchestrator-parser
-git log --oneline --decorate -5
 cat docs/HANDOVER.md
-```
-
-2. Say to ChatGPT:
-> "Continue from docs/HANDOVER.md at RC1-3. Git is canonical memory."
-
-That is sufficient context.
-
+git tag --list | grep v0.7.3
 ---
 
 ## 7. Engineering principle (non-negotiable)
