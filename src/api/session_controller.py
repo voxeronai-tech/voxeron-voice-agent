@@ -1215,6 +1215,27 @@ class SessionController:
                 await self.send_user_text(ws, transcript)
 
                 yn = self.oa.fast_yes_no(transcript) if hasattr(self.oa, "fast_yes_no") else None
+                # RC fix: allow "yes, ..." / "ja, ..." during cart_check and keep processing the remainder
+                t0 = (transcript or "").strip()
+                t0_low = t0.lower()
+
+                m = re.match(
+                    r"^(yes|yeah|yep|ok|okay|sure|ja|oke|prima)\b[\s,!.:-]+(.+)$",
+                    t0_low,
+                )
+                if m:
+                    yn = "AFFIRM"
+                    transcript = m.group(2).strip()
+
+                else:
+                    m2 = re.match(
+                        r"^(no|nope|nah|nee)\b[\s,!.:-]+(.+)$",
+                        t0_low,
+                    )
+                    if m2:
+                        yn = "NEGATE"
+                        transcript = m2.group(2).strip()
+
                 if yn == "AFFIRM":
                     st.pending_cart_check = False
                     st.cart_check_snapshot = None
@@ -1222,17 +1243,25 @@ class SessionController:
                     await self.clear_thinking(ws)
                     await self._speak(ws, self._say_anything_else())
                     return
+
                 if yn == "NEGATE":
                     st.pending_cart_check = False
+                    st.cart_check_snapshot = None
                     st.cart_check_retries = 0
                     await self.clear_thinking(ws)
-                    await self._speak(
-                        ws,
-                        "No problem. What would you like to change?"
-                        if st.lang != "nl"
-                        else "Geen probleem. Wat wil je aanpassen?",
-                    )
-                    return
+
+                    # If they said "No, ..." and continued with the change request,
+                    # keep processing the remainder in the normal flow.
+                    if (transcript or "").strip():
+                        pass  # fall through
+                    else:
+                        await self._speak(
+                            ws,
+                            "No problem. What would you like to change?"
+                            if st.lang != "nl"
+                            else "Geen probleem. Wat wil je aanpassen?",
+                        )
+                        return
 
                 # Empty or unclear -> retry with escalating prompt
                 retries += 1
@@ -1286,7 +1315,6 @@ class SessionController:
                 transcript = re.sub(r"\bdat zal het zijn\b", "that'll be all", transcript, flags=re.IGNORECASE)
                 transcript = re.sub(r"\bdat zal alles zijn\b", "that'll be all", transcript, flags=re.IGNORECASE)
                 transcript = re.sub(r"\ben\b", "and", transcript, flags=re.IGNORECASE)
-                transcript = re.sub(r"\bdoe\b", "two", transcript, flags=re.IGNORECASE)
 
             # RC3: acoustic alias for Dutch 'lam' -> 'lamb' to improve deterministic matching.
             transcript = re.sub(r"\blam\b", "lamb", transcript, flags=re.IGNORECASE)
@@ -1352,7 +1380,6 @@ class SessionController:
 
                         await self._speak(ws, f"I've added {label} to your order. {self._say_anything_else()}")
                         return
-
 
             # If order already completed, keep it closed (RC3 deterministic)
             if getattr(st, "order_complete", False):
@@ -1767,6 +1794,26 @@ class SessionController:
                     adds = parse_add_item(st.menu, transcript, qty=effective_qty)
 
                 # Naan detection (generic + explicit mentions)
+                # --- RC fix: handle naan quantity UPDATE without re-entering variant slot ---
+                t_low = (transcript or "").lower()
+                if st.menu and (" naan" in t_low or "nan" in t_low) and any(m in t_low for m in ("instead of", "make it", "change to", "in plaats van", "doe er", "maak er", "maak het")):
+                    from src.api.parser.quantity import extract_quantity_1_to_10
+                    new_qty = extract_quantity_1_to_10(transcript)
+                    if isinstance(new_qty, int) and new_qty >= 1:
+                        naan_ids = [iid for iid in (st.order.items or {}).keys() if self._is_nan_item(st.menu, iid)]
+                        if len(naan_ids) == 1:
+                            iid = naan_ids[0]
+                            st.order.items[iid] = int(new_qty)
+                            st.pending_choice = None
+                            st.pending_qty = 1
+                            st.nan_prompt_count = 0
+                            await self.clear_thinking(ws)
+                            cart = st.order.summary(st.menu) if st.menu else ""
+                            st.pending_cart_check = True
+                            st.cart_check_snapshot = cart
+                            await self._speak(ws, f"Okay, so that\x27s {cart}. Is that correct?" if st.lang != "nl" else f"Oké, dus dat is: {cart}. Klopt dat?")
+                            return
+
                 mentions_nan, has_variant, variant = self._check_naan_request(st.menu, transcript)
 
                 # RC3.1: acoustic alias inside naan context ("lamb" -> "plain" if no lamb-naan exists)
