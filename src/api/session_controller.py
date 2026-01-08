@@ -1168,6 +1168,69 @@ class SessionController:
             # keep pending_choice, do not reprompt immediately
             return True
 
+
+        # RC3: support split answers inside the naan-variant slot, e.g.
+        # "one plain naan and one garlic naan" (with per-variant quantities).
+        t_low2 = t_norm.lower()
+
+        has_plain = bool(re.search(r"\b(plain|normal|regular|gewoon|simpel|standard)\b", t_low2))
+        has_garlic = bool(re.search(r"\b(garlic|knoflook)\b", t_low2))
+
+        if has_plain and has_garlic and st.menu:
+            def _qty_tok(tok: str) -> int | None:
+                t = (tok or "").strip().lower()
+                if t.isdigit():
+                    q = int(t)
+                    return q if 1 <= q <= 20 else None
+                m = {
+                    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                    "een": 1, "één": 1, "twee": 2, "drie": 3, "vier": 4, "vijf": 5,
+                }
+                return m.get(t)
+
+            # last-match wins (handles "instead of two plain naan, one plain naan and one garlic naan")
+            p_all = re.findall(r"\b(\d+|one|two|three|four|five|een|één|twee|drie|vier|vijf)\b\s+(?:\w+\s+){0,2}?(plain|normal|regular|gewoon|simpel|standard)\s+(naan|nan)\b", t_low2)
+            g_all = re.findall(r"\b(\d+|one|two|three|four|five|een|één|twee|drie|vier|vijf)\b\s+(?:\w+\s+){0,2}?(garlic|knoflook)\s+(naan|nan)\b", t_low2)
+
+            plain_qty = _qty_tok(p_all[-1][0]) if p_all else None
+            garlic_qty = _qty_tok(g_all[-1][0]) if g_all else None
+
+            # fallback: if user says "one naan and one garlic naan", infer first qty as plain
+            if plain_qty is None:
+                mf = re.findall(r"\b(\d+|one|two|three|four|five|een|één|twee|drie|vier|vijf)\b", t_low2)
+                if mf:
+                    plain_qty = _qty_tok(mf[0])
+
+            plain_qty = int(plain_qty or 1)
+            garlic_qty = int(garlic_qty or 1)
+
+            plain_iid = self._find_naan_item_for_variant(st.menu, "plain")
+            garlic_iid = self._find_naan_item_for_variant(st.menu, "garlic")
+
+            if plain_iid and garlic_iid and plain_iid != garlic_iid:
+                st.order.set_qty(plain_iid, plain_qty)
+                st.order.set_qty(garlic_iid, garlic_qty)
+
+                # Remove any other naan ids (including generic Nan) to avoid leftovers
+                for iid in list((st.order.items or {}).keys()):
+                    if self._is_nan_item(st.menu, iid) and iid not in (plain_iid, garlic_iid):
+                        st.order.items.pop(iid, None)
+
+                st.pending_choice = None
+                st.pending_qty = 1
+                st.nan_prompt_count = 0
+                await self.clear_thinking(ws)
+
+                cart = st.order.summary(st.menu) if st.menu else ""
+                st.pending_cart_check = True
+                st.cart_check_snapshot = cart
+                await self._speak(
+                    ws,
+                    f"Okay, so that's {cart}. Is that correct?" if st.lang != "nl" else f"Oké, dus dat is: {cart}. Klopt dat?",
+                )
+                return True
+
+
         # Primary extractor expects a "naan/nan" token; use it first.
         variant = _extract_nan_variant_keyword_scoped(t_norm)
 
