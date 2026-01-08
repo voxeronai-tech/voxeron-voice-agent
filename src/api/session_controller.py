@@ -1953,25 +1953,24 @@ class SessionController:
                                 return m.get(t)
 
                             tlow2 = t_low
-                            # Plain qty: prefer explicit 'one plain naan' etc; else fall back to first qty token.
                             plain_qty = None
                             garlic_qty = None
 
-                            # qty near 'garlic naan'
-                            mg = re.search(r"\b(\d+|one|two|three|four|five|een|één|twee|drie|vier|vijf)\b\s+(?:\w+\s+){0,2}?(garlic|knoflook)\s+(naan|nan)\b", tlow2)
-                            if mg:
-                                garlic_qty = _qty_from_tok(mg.group(1))
+                            # LAST match wins: this handles phrases like
+                            # 'instead of two plain naan, one plain naan and one garlic naan'
+                            g_all = re.findall(r"\b(\d+|one|two|three|four|five|een|één|twee|drie|vier|vijf)\b\s+(?:\w+\s+){0,2}?(garlic|knoflook)\s+(naan|nan)\b", tlow2)
+                            if g_all:
+                                garlic_qty = _qty_from_tok(g_all[-1][0])
 
-                            # qty near 'plain naan' (or synonyms)
-                            mp = re.search(r"\b(\d+|one|two|three|four|five|een|één|twee|drie|vier|vijf)\b\s+(?:\w+\s+){0,2}?(plain|regular|normal|gewoon|normaal|standaard)\s+(naan|nan)\b", tlow2)
-                            if mp:
-                                plain_qty = _qty_from_tok(mp.group(1))
+                            p_all = re.findall(r"\b(\d+|one|two|three|four|five|een|één|twee|drie|vier|vijf)\b\s+(?:\w+\s+){0,2}?(plain|regular|normal|gewoon|normaal|standaard)\s+(naan|nan)\b", tlow2)
+                            if p_all:
+                                plain_qty = _qty_from_tok(p_all[-1][0])
 
-                            # fallback: first qty token in the sentence (covers 'one naan and two garlic naan')
+                            # fallback: if user says 'one naan and one garlic naan', infer first qty as plain
                             if plain_qty is None:
-                                mf = re.search(r"\b(\d+|one|two|three|four|five|een|één|twee|drie|vier|vijf)\b", tlow2)
+                                mf = re.findall(r"\b(\d+|one|two|three|four|five|een|één|twee|drie|vier|vijf)\b", tlow2)
                                 if mf:
-                                    plain_qty = _qty_from_tok(mf.group(1))
+                                    plain_qty = _qty_from_tok(mf[0])
 
                             plain_qty = int(plain_qty or 1)
                             garlic_qty = int(garlic_qty or 1)
