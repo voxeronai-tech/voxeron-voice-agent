@@ -1244,7 +1244,6 @@ class SessionController:
 
                 # Always show what STT heard during cart confirmation (helps debugging + UI transcript)
                 logger.info("STT: %s", transcript)
-                await self.send_user_text(ws, transcript)
 
                 yn = self.oa.fast_yes_no(transcript) if hasattr(self.oa, "fast_yes_no") else None
                 # RC fix: allow "yes, ..." / "ja, ..." during cart_check and keep processing the remainder
