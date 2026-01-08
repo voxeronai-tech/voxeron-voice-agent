@@ -1880,7 +1880,8 @@ class SessionController:
             items_before = dict(st.order.items)
 
             # Extract quantity once (support EN/NL), default 1
-            add_qty = (_extract_qty_first(transcript, "en") or _extract_qty_first(transcript, "nl") or 1)
+            raw_qty = (_extract_qty_first(transcript, "en") or _extract_qty_first(transcript, "nl"))
+            add_qty = (raw_qty or 1)
             effective_qty = add_qty
             now_ts = time.time()
 
@@ -1907,6 +1908,19 @@ class SessionController:
                 # Standard deterministic matcher (alias_map hits)
                 if not added_any:
                     adds = parse_add_item(st.menu, transcript, qty=effective_qty)
+
+                # RC3: suppress implicit re-adds when user merely repeats an item name
+                # (e.g., "Lamb Karahi" during spice/fulfillment/name phases).
+                # Only suppress if:
+                # - exactly one item hit
+                # - user did NOT express explicit add intent
+                # - user did NOT state an explicit quantity in the utterance
+                # - item is already present in the cart
+                if adds and len(adds) == 1 and (not has_explicit_add_intent) and (raw_qty is None):
+                    _iid, _q0 = adds[0]
+                    if isinstance(getattr(st.order, "items", None), dict) and (st.order.items.get(_iid, 0) or 0) > 0:
+                        logger.info("RC3: suppress implicit re-add on bare item mention: %s", _iid)
+                        adds = []
 
                 # Naan detection (generic + explicit mentions)
                 # --- RC3: handle split edits like "one plain naan and one garlic naan" deterministically ---
