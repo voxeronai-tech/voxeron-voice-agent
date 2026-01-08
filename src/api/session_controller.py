@@ -1374,17 +1374,41 @@ class SessionController:
                             else "Geen probleem. Wat wil je aanpassen?",
                         )
                         return
-                # Non-binary input while in cart check, treat it as a new intent (RC3)
-                if yn not in ("AFFIRM", "NEGATE") and (transcript or "").strip():
-                    logger.info("RC3: exit pending_cart_check latch on non-binary input: %r", transcript)
-                    st.pending_cart_check = False
-                    st.cart_check_snapshot = None
-                    st.cart_check_retries = 0
-                    # fall through to normal flow (do NOT prompt yes/no)
-                else:
-                    # Empty or unclear -> retry with escalating prompt
+                # Non-binary input while in cart check: DO NOT exit the latch.
+                # Treat it as unclear and reprompt yes/no (prevents accidental checkout on "dat is alles").
+                if yn not in ("AFFIRM", "NEGATE"):
                     retries += 1
                     st.cart_check_retries = retries
+
+                    cart = st.cart_check_snapshot or (st.order.summary(st.menu) if st.menu else "")
+                    await self.clear_thinking(ws)
+
+                    if retries >= 3:
+                        # Give up on explicit confirmation; continue the flow safely.
+                        st.pending_cart_check = False
+                        st.cart_check_snapshot = None
+                        st.cart_check_retries = 0
+                        if not st.fulfillment_mode:
+                            st.pending_fulfillment = True
+                            await self._speak(ws, self._say_pickup_or_delivery())
+                        else:
+                            await self._speak(ws, self._say_anything_else())
+                        return
+
+                    if retries == 2:
+                        msg = "Please say yes or no." if st.lang != "nl" else "Zeg alsjeblieft ja of nee."
+                        await self._speak(ws, msg)
+                        return
+
+                    await self._speak(
+                        ws,
+                        f"Okay, so that's {cart}. Is that correct?"
+                        if st.lang != "nl"
+                        else f"Oké, dus dat is: {cart}. Klopt dat?",
+                    )
+                    return
+
+                # AFFIRM/NEGATE handled above; if we got here, fall through
 
                     cart = st.cart_check_snapshot or (st.order.summary(st.menu) if st.menu else "")
                     await self.clear_thinking(ws)
