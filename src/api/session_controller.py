@@ -603,6 +603,125 @@ class SessionController:
             return "taj_mahal"
         return None
 
+
+    def _taj_overlay_alias_map(self, menu: MenuSnapshot) -> Dict[str, str]:
+        """
+        Map TAJ_EXTRA_ALIASES (display-name style) to actual item_ids where possible.
+        Returns alias -> item_id mapping.
+        """
+        out: Dict[str, str] = {}
+        if not menu:
+            return out
+
+        # Build reverse lookup by display name (lower)
+        name_to_id: Dict[str, str] = {}
+        for _n, iid in menu.name_choices:
+            dn = (menu.display_name(iid) or "").strip().lower()
+            if dn:
+                name_to_id[dn] = iid
+
+        for alias, target in TAJ_EXTRA_ALIASES.items():
+            if target == "__GLOBAL_ORDER__":
+                continue
+            iid = name_to_id.get(target.lower())
+            if iid:
+                out[alias] = iid
+        return out
+
+    def _maybe_orchestrator_match_item(self, menu: MenuSnapshot, transcript: str, qty: int) -> Optional[str]:
+        """
+        Optional RC3: deterministic parser BEFORE any LLM.
+        This is intentionally conservative: only for short utterances.
+        Returns item_id if matched.
+        """
+        if CognitiveOrchestrator is None or OrchestratorRoute is None:
+            return None
+        if not menu:
+            return None
+
+        # Only run for short utterances to avoid double-add with parse_add_item
+        if len((transcript or "").strip().split()) > 3:
+            return None
+
+        alias_map: Dict[str, str] = dict(menu.alias_map or {})
+        if self.state.tenant_ref == "taj_mahal":
+            alias_map.update(self._taj_overlay_alias_map(menu))
+
+        orch = CognitiveOrchestrator(alias_map=alias_map)
+        decision = orch.decide(transcript)
+
+        if decision.route != OrchestratorRoute.DETERMINISTIC:
+            return None
+
+        item_id = decision.parser_result.matched_entity
+        if not isinstance(item_id, str) or not item_id:
+            return None
+
+        # Do not mutate cart here; caller decides to avoid double-add.
+        return item_id
+
+    def _maybe_orchestrator_apply_qty_update(self, menu: MenuSnapshot, transcript: str) -> Optional[Tuple[str, int]]:
+        """
+        Deterministic qty/update intent BEFORE LLM.
+
+        Returns (item_id, new_qty) if applied, else None.
+
+        Conservative target selection:
+          1) if we have a recent last_added item, update that
+          2) else if exactly one item in cart, update that
+          3) else do nothing (let LLM clarify)
+        """
+        if CognitiveOrchestrator is None or OrchestratorRoute is None:
+            return None
+        if not menu:
+            return None
+
+        alias_map: Dict[str, str] = dict(menu.alias_map or {})
+        if self.state.tenant_ref == "taj_mahal":
+            alias_map.update(self._taj_overlay_alias_map(menu))
+
+        orch = CognitiveOrchestrator(alias_map=alias_map)
+        decision = orch.decide(transcript)
+        if decision.route != OrchestratorRoute.DETERMINISTIC:
+            return None
+
+        payload = decision.parser_result.matched_entity
+        if not (isinstance(payload, dict) and (payload.get("action") == "SET_QTY")):
+            return None
+
+        try:
+            new_qty = int(payload.get("quantity") or 0)
+        except Exception:
+            return None
+        if new_qty <= 0:
+            return None
+
+        st = self.state
+        items = getattr(st.order, "items", None)
+        if not isinstance(items, dict) or not items:
+            return None
+
+        # 1) Prefer last-added item if available
+        try:
+            last_added = getattr(st, "last_added", None)
+            if isinstance(last_added, list) and last_added:
+                iid = last_added[0][0]
+                if isinstance(iid, str) and iid in items:
+                    items[iid] = new_qty
+                    return (iid, new_qty)
+        except Exception:
+            pass
+
+        # 2) If only one item, update it
+        if len(items) == 1:
+            iid = next(iter(items.keys()))
+            if isinstance(iid, str):
+                items[iid] = new_qty
+                return (iid, new_qty)
+
+        return None
+
+
     async def _load_tenant_context(self, tenant_ref: str) -> None:
         st = self.state
         st.locked_voice = None
@@ -948,7 +1067,9 @@ class SessionController:
                                 added_ids.append(iid)
                                 break
 
-                adds = parse_add_item(st.menu, transcript, qty=effective_qty)
+                # RC3: prevent double-add when orchestrator already matched
+                orch_item_id = self._maybe_orchestrator_match_item(st.menu, transcript, int(effective_qty or 1))
+                adds = [] if orch_item_id else parse_add_item(st.menu, transcript, qty=effective_qty)
 
                 mentions_nan = (" naan " in (" " + norm_simple(transcript) + " ")) or detect_generic_nan_request(transcript)
                 variant = _extract_nan_variant_keyword_scoped(transcript)
