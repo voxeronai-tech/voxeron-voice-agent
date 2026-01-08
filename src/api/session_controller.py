@@ -1979,6 +1979,68 @@ class SessionController:
             effective_qty = add_qty
             now_ts = time.time()
 
+            # ----------------------------------------------------------
+            # RC3: "extra/another/one more" MUST increment the mentioned naan variant,
+            # not set an absolute qty and not touch generic Nan.
+            # Examples:
+            # - "add one extra garlic naan" -> +1 garlic naan
+            # - "another garlic naan" -> +1 garlic naan
+            # - "add 2 extra garlic naan" -> +2 garlic naan
+            # ----------------------------------------------------------
+            t_norm2 = " " + norm_simple(transcript or "") + " "
+            t_low2 = t_norm2.lower()
+
+            inc_cue = (
+                (" extra " in t_low2)
+                or (" another " in t_low2)
+                or (" one more " in t_low2)
+                or (" an extra " in t_low2)
+                or (" nog een " in t_low2)
+                or (" erbij " in t_low2)
+            )
+
+            if inc_cue and st.menu and re.search(r"\b(naan|nan)\b", t_low2):
+                variant2: Optional[str] = None
+                if re.search(r"\b(garlic|knoflook)\b", t_low2):
+                    variant2 = "garlic"
+                elif re.search(r"\b(plain|normal|regular|gewoon|simpel|standard)\b", t_low2):
+                    variant2 = "plain"
+                elif re.search(r"\b(cheese|kaas)\b", t_low2):
+                    variant2 = "cheese"
+                elif re.search(r"\b(peshawari)\b", t_low2):
+                    variant2 = "peshawari"
+                elif re.search(r"\b(keema)\b", t_low2):
+                    variant2 = "keema"
+
+                if variant2:
+                    iid2 = self._find_naan_item_for_variant(st.menu, variant2)
+                    if iid2:
+                        delta2 = int(raw_qty or 1)
+                        delta2 = max(1, delta2)
+
+                        logger.info(
+                            "RC3: naan_extra_increment cue=%r variant=%s delta=%s transcript=%r",
+                            True, variant2, delta2, transcript,
+                        )
+
+                        st.order.add(iid2, delta2)
+                        st.last_added = [(iid2, delta2)]
+                        st.pending_qty = 1
+                        st.pending_choice = None
+
+                        await self.clear_thinking(ws)
+
+                        cart = st.order.summary(st.menu) if st.menu else ""
+                        st.pending_cart_check = True
+                        st.cart_check_snapshot = cart
+                        await self._speak(
+                            ws,
+                            f"Okay, so that's {cart}. Is that correct?"
+                            if st.lang != "nl"
+                            else f"Oké, dus dat is: {cart}. Klopt dat?",
+                        )
+                        return
+
             # RC3.4: held-quantity for split utterances like "Yes, one ..." + next turn item
             if st.pending_qty_hold and now_ts < st.pending_qty_deadline:
                 effective_qty = st.pending_qty_hold
