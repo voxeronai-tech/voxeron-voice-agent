@@ -1971,6 +1971,7 @@ class SessionController:
                     from src.api.parser.quantity import extract_quantity_1_to_10
                     new_qty = extract_quantity_1_to_10(transcript)
                     if isinstance(new_qty, int) and new_qty >= 1:
+                        logger.info("RC3: naan_qty_update detected new_qty=%s transcript=%r", new_qty, transcript)
                         naan_ids = [iid for iid in (st.order.items or {}).keys() if self._is_nan_item(st.menu, iid)]
                         if len(naan_ids) == 1:
                             iid = naan_ids[0]
@@ -1982,6 +1983,7 @@ class SessionController:
                             cart = st.order.summary(st.menu) if st.menu else ""
                             st.pending_cart_check = True
                             st.cart_check_snapshot = cart
+                            logger.info("RC3: naan_qty_update speaking cart_check cart=%r", cart)
                             await self._speak(ws, f"Okay, so that\x27s {cart}. Is that correct?" if st.lang != "nl" else f"Oké, dus dat is: {cart}. Klopt dat?")
                             return
 
