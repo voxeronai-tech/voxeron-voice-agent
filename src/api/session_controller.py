@@ -1374,44 +1374,77 @@ class SessionController:
                             else "Geen probleem. Wat wil je aanpassen?",
                         )
                         return
-                # Non-binary input while in cart check: DO NOT exit the latch.
-                # Treat it as unclear and reprompt yes/no (prevents accidental checkout on "dat is alles").
+                # Non-binary input during cart check:
+                # - If it contains a real action (add/change/remove/item mention), exit latch and process normally.
+                # - Otherwise, keep latch and reprompt yes/no (prevents accidental checkout on 'dat is alles').
                 if yn not in ("AFFIRM", "NEGATE"):
-                    retries += 1
-                    st.cart_check_retries = retries
+                    t_low = (transcript or "").lower()
 
-                    cart = st.cart_check_snapshot or (st.order.summary(st.menu) if st.menu else "")
-                    await self.clear_thinking(ws)
+                    has_action_words = any(k in t_low for k in (
+                        # EN
+                        " add", "another", " extra", " forgot", " instead of", " change", " make it", " remove", " cancel",
+                        " can you add", " could you add", " please add",
+                        # NL
+                        " voeg", " nog een", " extra", " vergeten", " in plaats van", " verander", " maak", " haal weg", " annuleer",
+                    ))
 
-                    if retries >= 3:
-                        # Give up on explicit confirmation; continue the flow safely.
+                    action_items = []
+                    try:
+                        if st.menu:
+                            action_items = parse_add_item(st.menu, transcript, qty=1)
+                    except Exception:
+                        action_items = []
+
+                    mentions_nan2 = False
+                    has_variant2 = False
+                    try:
+                        if st.menu:
+                            mentions_nan2, has_variant2, _v2 = self._check_naan_request(st.menu, transcript)
+                    except Exception:
+                        pass
+
+                    actionable = bool(has_action_words or action_items or (mentions_nan2 and ("naan" in t_low or "nan" in t_low or has_variant2)))
+
+                    if actionable:
+                        # Exit latch and let normal flow handle the new intent (no yes/no nag loop)
                         st.pending_cart_check = False
                         st.cart_check_snapshot = None
                         st.cart_check_retries = 0
-                        if not st.fulfillment_mode:
-                            st.pending_fulfillment = True
-                            await self._speak(ws, self._say_pickup_or_delivery())
-                        else:
-                            await self._speak(ws, self._say_anything_else())
-                        return
+                        # fall through
+                    else:
+                        retries += 1
+                        st.cart_check_retries = retries
 
-                    if retries == 2:
-                        msg = "Please say yes or no." if st.lang != "nl" else "Zeg alsjeblieft ja of nee."
-                        await self._speak(ws, msg)
-                        return
+                        cart = st.cart_check_snapshot or (st.order.summary(st.menu) if st.menu else "")
+                        await self.clear_thinking(ws)
 
-                    await self._speak(
-                        ws,
-                        f"Okay, so that's {cart}. Is that correct?"
-                        if st.lang != "nl"
-                        else f"Oké, dus dat is: {cart}. Klopt dat?",
-                    )
-                    return
+                        if retries >= 3:
+                            # Give up on explicit confirmation; continue the flow safely.
+                            st.pending_cart_check = False
+                            st.cart_check_snapshot = None
+                            st.cart_check_retries = 0
+                            if not st.fulfillment_mode:
+                                st.pending_fulfillment = True
+                                await self._speak(ws, self._say_pickup_or_delivery())
+                            else:
+                                await self._speak(ws, self._say_anything_else())
+                            return
+
+                        if retries == 2:
+                            msg = "Please say yes or no." if st.lang != "nl" else "Zeg alsjeblieft ja of nee."
+                            await self._speak(ws, msg)
+                            return
+
+                        await self._speak(
+                            ws,
+                            f"Okay, so that's {cart}. Is that correct?"
+                            if st.lang != "nl"
+                            else f"Oké, dus dat is: {cart}. Klopt dat?",
+                        )
+                        return
 
                 # AFFIRM/NEGATE handled above; if we got here, fall through
 
-                    cart = st.cart_check_snapshot or (st.order.summary(st.menu) if st.menu else "")
-                    await self.clear_thinking(ws)
 
                     if retries >= 3:
                         # Give up on explicit confirmation; continue the flow safely.
