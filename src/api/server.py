@@ -440,7 +440,7 @@ async def _handle_ws(ws: WebSocket) -> None:
     # RC3: merge split user turns across short pauses (prevents agent interrupting)
     pending_utter: bytes | None = None
     pending_deadline_ts: float = 0.0
-    PAUSE_MERGE_SEC = 0.9
+    PAUSE_MERGE_SEC = 1.8
 
     try:
         while True:
