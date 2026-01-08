@@ -1938,10 +1938,46 @@ class SessionController:
                         garlic_iid = self._find_naan_item_for_variant(st.menu, "garlic")
 
                         if plain_iid and garlic_iid and plain_iid != garlic_iid:
-                            # Set split quantities. Keep it minimal: default 1 each.
-                            # (We can refine per-variant qty parsing later if needed.)
-                            st.order.set_qty(plain_iid, 1)
-                            st.order.set_qty(garlic_iid, 1)
+                            # RC3: parse per-variant quantities deterministically (EN/NL + digits)
+                            def _qty_from_tok(tok: str):
+                                t = (tok or '').strip().lower()
+                                if t.isdigit():
+                                    q = int(t)
+                                    return q if 1 <= q <= 20 else None
+                                m = {
+                                    # EN
+                                    'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+                                    # NL
+                                    'een': 1, 'één': 1, 'twee': 2, 'drie': 3, 'vier': 4, 'vijf': 5,
+                                }
+                                return m.get(t)
+
+                            tlow2 = t_low
+                            # Plain qty: prefer explicit 'one plain naan' etc; else fall back to first qty token.
+                            plain_qty = None
+                            garlic_qty = None
+
+                            # qty near 'garlic naan'
+                            mg = re.search(r"\b(\d+|one|two|three|four|five|een|één|twee|drie|vier|vijf)\b\s+(?:\w+\s+){0,2}?(garlic|knoflook)\s+(naan|nan)\b", tlow2)
+                            if mg:
+                                garlic_qty = _qty_from_tok(mg.group(1))
+
+                            # qty near 'plain naan' (or synonyms)
+                            mp = re.search(r"\b(\d+|one|two|three|four|five|een|één|twee|drie|vier|vijf)\b\s+(?:\w+\s+){0,2}?(plain|regular|normal|gewoon|normaal|standaard)\s+(naan|nan)\b", tlow2)
+                            if mp:
+                                plain_qty = _qty_from_tok(mp.group(1))
+
+                            # fallback: first qty token in the sentence (covers 'one naan and two garlic naan')
+                            if plain_qty is None:
+                                mf = re.search(r"\b(\d+|one|two|three|four|five|een|één|twee|drie|vier|vijf)\b", tlow2)
+                                if mf:
+                                    plain_qty = _qty_from_tok(mf.group(1))
+
+                            plain_qty = int(plain_qty or 1)
+                            garlic_qty = int(garlic_qty or 1)
+
+                            st.order.set_qty(plain_iid, plain_qty)
+                            st.order.set_qty(garlic_iid, garlic_qty)
 
                             # Remove any other naan ids to avoid "2x Nan" leftovers
                             for iid in list((st.order.items or {}).keys()):
