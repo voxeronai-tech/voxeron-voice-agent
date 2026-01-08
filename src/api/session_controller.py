@@ -1132,6 +1132,51 @@ class SessionController:
                 await self._speak(ws, self._say_anything_else())
                 return
 
+            # RC3: explicit "done/checkout" intent must bypass LLM and start fulfillment flow
+            # (Prevents LLM from inventing irrelevant steps like "spice level".)
+            if st.menu:
+                t_norm = " " + norm_simple(transcript) + " "
+                checkout_intent = any(k in t_norm for k in [
+                    " that's all ", " that is all ", " thats all ", " that's it ", " thats it ",
+                    " nothing else ", " no more ", " done ", " finish ", " finalize ",
+                    " checkout ", " check out ", " place the order ", " confirm ", " complete the order ",
+                    " dat is alles ", " dat was alles ", " niks meer ", " niets meer ", " klaar ",
+                    " afronden ", " rond af ", " afrekenen ", " bevestig ", " bestelling plaatsen ",
+                    " no that will be all ", " that will be all ", " dat will be all ",
+                ])
+
+                cart_now = st.order.summary(st.menu) if st.menu else ""
+                if checkout_intent and cart_now:
+                    await self.clear_thinking(ws)
+
+                    if not st.fulfillment_mode:
+                        st.pending_fulfillment = True
+                        await self._speak(ws, self._say_pickup_or_delivery())
+                        return
+
+                    if st.fulfillment_mode == "pickup" and not st.customer_name:
+                        st.pending_name = True
+                        await self._speak(ws, "Great. What name should I put the order under?" if st.lang != "nl" else "Prima. Op welke naam mag ik de bestelling zetten?")
+                        return
+
+                    # If we already have fulfillment + name (or delivery), recap briefly
+                    await self._speak(
+                        ws,
+                        f"Perfect. Your order is: {cart_now}. Anything else?"
+                        if st.lang != "nl"
+                        else f"Perfect. Je bestelling is: {cart_now}. Nog iets?"
+                    )
+                    return
+            # RC1-3: apply deterministic qty updates before LLM
+            if st.menu:
+                applied = self._maybe_orchestrator_apply_qty_update(st.menu, transcript)
+                if applied is not None:
+                    _iid, new_qty = applied
+                    await self.clear_thinking(ws)
+                    msg = f"Got it — quantity set to {new_qty}." if st.lang != "nl" else f"Goed — aantal aangepast naar {new_qty}."
+                    await self._speak(ws, msg)
+                    return
+
             # ==========================================================
             # 7) LLM fallback
             # ==========================================================
