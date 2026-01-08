@@ -243,6 +243,74 @@ def _looks_like_stt_prompt_dump(text: str) -> bool:
     return False
 
 
+_QTY_WORDS: Dict[str, int] = {
+    # NL
+    "een": 1,
+    "één": 1,
+    "twee": 2,
+    "drie": 3,
+    "vier": 4,
+    "vijf": 5,
+    "zes": 6,
+    "zeven": 7,
+    "acht": 8,
+    "negen": 9,
+    "tien": 10,
+    # EN
+    "a": 1,
+    "an": 1,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
+
+
+def _qty_near_span(t_norm: str, span_start: int, span_end: int) -> Optional[int]:
+    """Deterministic local quantity detector near an alias match span."""
+    toks = [(m.group(0), m.start(), m.end()) for m in re.finditer(r"[A-Za-zÀ-ÿ0-9]+", t_norm)]
+    if not toks:
+        return None
+
+    idx = None
+    for i, (_tok, s0, e0) in enumerate(toks):
+        if not (e0 <= span_start or s0 >= span_end):
+            idx = i
+            break
+    if idx is None:
+        return None
+
+    left = max(0, idx - 3)
+    right = min(len(toks) - 1, idx + 1)
+
+    # Prefer left-side qty ("two naan", "twee naan")
+    for i in range(idx - 1, left - 1, -1):
+        tok = toks[i][0].lower()
+        if tok.isdigit():
+            q = int(tok)
+            return q if 1 <= q <= 20 else None
+        if tok in _QTY_WORDS:
+            return _QTY_WORDS[tok]
+
+    # Also accept "naan x2" / "naan 2x"
+    for i in range(idx, right + 1):
+        tok = toks[i][0].lower()
+        if tok.endswith("x") and tok[:-1].isdigit():
+            q = int(tok[:-1])
+            return q if 1 <= q <= 20 else None
+        if tok.startswith("x") and tok[1:].isdigit():
+            q = int(tok[1:])
+            return q if 1 <= q <= 20 else None
+
+    return None
+
+
 def parse_add_item(menu: MenuSnapshot, text: str, *, qty: int) -> List[Tuple[str, int]]:
     """
     Deterministic alias matcher.
@@ -273,7 +341,7 @@ def parse_add_item(menu: MenuSnapshot, text: str, *, qty: int) -> List[Tuple[str
 
     candidates.sort(key=lambda x: (-(x[1] - x[0]), x[0]))
 
-    chosen: List[Tuple[str, int]] = []
+    chosen_spans: List[Tuple[str, int, int]] = []  # (item_id, start, end)
     used_item_ids = set()
     used_spans: List[Tuple[int, int]] = []
 
@@ -289,9 +357,22 @@ def parse_add_item(menu: MenuSnapshot, text: str, *, qty: int) -> List[Tuple[str
             continue
         used_item_ids.add(item_id)
         used_spans.append((s0, e0))
-        chosen.append((item_id, q))
+        chosen_spans.append((item_id, s0, e0))
 
-    return chosen
+    if not chosen_spans:
+        return []
+
+    multi_item = (len({iid for (iid, _s, _e) in chosen_spans}) > 1)
+
+    out: List[Tuple[str, int]] = []
+    for item_id, s0, e0 in chosen_spans:
+        local_q = _qty_near_span(t, s0, e0)
+        if local_q is not None:
+            out.append((item_id, local_q))
+        else:
+            out.append((item_id, 1 if multi_item else q))
+
+    return out
 
 
 LLM_SYSTEM_BASE = """
