@@ -934,7 +934,7 @@ class SessionController:
         """
         Optional RC3: deterministic parser BEFORE any LLM.
         This is intentionally conservative: only for short utterances.
-        Returns item_id if matched and added.
+        Returns item_id if matched.
         """
         if CognitiveOrchestrator is None or OrchestratorRoute is None:
             return None
@@ -961,8 +961,8 @@ class SessionController:
         if not isinstance(item_id, str) or not item_id:
             return None
 
-        # Add deterministically
-        self.state.order.add(item_id, max(1, int(qty or 1)))
+        # RC3: do NOT mutate cart here.
+        # The caller decides whether/when to add to avoid double-adds.
         return item_id
 
     def _maybe_orchestrator_apply_qty_update(self, menu: MenuSnapshot, transcript: str) -> Optional[Tuple[str, int]]:
