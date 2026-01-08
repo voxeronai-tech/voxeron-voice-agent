@@ -1155,10 +1155,29 @@ class SessionController:
                 # Language lock: force STT language for fulfillment (prevents NL bleed when user speaks English).
                 stt_lang = st.lang if st.lang in ("en", "nl") else "en"
                 stt_prompt = FULFILLMENT_STT_PROMPT_NL if stt_lang == "nl" else FULFILLMENT_STT_PROMPT_EN
+
                 try:
                     transcript = await self.oa.transcribe_pcm(pcm, stt_lang, prompt=stt_prompt)
                 except Exception:
                     transcript = ""
+
+                # RC3: Fulfillment slot is STRICT.
+                # Only accept pickup/delivery. If STT drifts to generic "order" phrases,
+                # treat it as NO ANSWER so the slot stays active and we reprompt.
+                if transcript:
+                    tn = " " + norm_simple(transcript) + " "
+
+                    if re.search(r"\b(pickup|pick up|afhalen|afhaal)\b", tn):
+                        transcript = "pickup"
+                    elif re.search(r"\b(delivery|bezorgen|bezorging|thuisbezorg)\b", tn):
+                        transcript = "delivery"
+                    else:
+                        # Ignore common STT bias outputs in this slot.
+                        if re.search(
+                            r"\b(ik wil bestellen|bestellen|i want to order|want to order|place an order)\b",
+                            tn,
+                        ):
+                            transcript = ""
 
             elif st.pending_choice == "nan_variant":
                 candidates: List[Tuple[str, str]] = []  # (txt, label)
