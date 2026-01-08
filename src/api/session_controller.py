@@ -1445,32 +1445,6 @@ class SessionController:
 
                 # AFFIRM/NEGATE handled above; if we got here, fall through
 
-
-                    if retries >= 3:
-                        # Give up on explicit confirmation; continue the flow safely.
-                        st.pending_cart_check = False
-                        st.cart_check_snapshot = None
-                        st.cart_check_retries = 0
-                        if not st.fulfillment_mode:
-                            st.pending_fulfillment = True
-                            await self._speak(ws, self._say_pickup_or_delivery())
-                        else:
-                            await self._speak(ws, self._say_anything_else())
-                        return
-
-                    if retries == 2:
-                        msg = "Please say yes or no." if st.lang != "nl" else "Zeg alsjeblieft ja of nee."
-                        await self._speak(ws, msg)
-                        return
-
-                    await self._speak(
-                        ws,
-                        f"Sorry, just to confirm: {cart}. Is that correct?"
-                        if st.lang != "nl"
-                        else f"Sorry, even checken: {cart}. Klopt dat?",
-                    )
-                    return
-
             if not transcript:
                 await self.clear_thinking(ws)
                 msg = (
