@@ -2059,7 +2059,19 @@ class SessionController:
             cart_after = st.order.summary(st.menu) if st.menu else ""
             if added_any and st.menu and cart_after and cart_after != (cart_before or ""):
                 await self.clear_thinking(ws)
-                if not st.fulfillment_mode:
+
+                # RC3: do NOT auto-start checkout (pickup/delivery) after any add.
+                # Only start checkout if the user explicitly indicates they're done / want to place the order.
+                t_norm = " " + norm_simple(transcript) + " "
+                checkout_intent = any(k in t_norm for k in [
+                    " that's all ", " that is all ", " thats all ", " that's it ", " thats it ",
+                    " nothing else ", " no more ", " done ", " finish ", " finalize ",
+                    " checkout ", " check out ", " place the order ", " confirm ", " complete the order ",
+                    " dat is alles ", " dat was alles ", " niks meer ", " niets meer ", " klaar ",
+                    " afronden ", " rond af ", " afrekenen ", " bevestig ", " bestelling plaatsen ",
+                ])
+
+                if (not st.fulfillment_mode) and checkout_intent:
                     st.pending_fulfillment = True
                     await self._speak(ws, self._say_pickup_or_delivery())
                     return
