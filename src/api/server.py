@@ -440,7 +440,16 @@ async def _handle_ws(ws: WebSocket) -> None:
     # RC3: merge split user turns across short pauses (prevents agent interrupting)
     pending_utter: bytes | None = None
     pending_deadline_ts: float = 0.0
+
+    # Base grace window, tuned for normal speech pauses
     PAUSE_MERGE_SEC = 1.8
+
+    # Extra patience if the buffered utter is "short" (likely stutter / incomplete thought)
+    PAUSE_MERGE_SEC_FRAGMENT = 3.2
+    FRAGMENT_MAX_BYTES = 16000  # ~0.5s at 16kHz * 16-bit mono (adjust if your PCM differs)
+
+    # Server-side barge-in on audio energy (in case client doesn't send "barge_in")
+    BARGE_IN_RMS = 450.0  # tune, start ~350-600 depending on mic/noise
 
     try:
         while True:
@@ -499,7 +508,18 @@ async def _handle_ws(ws: WebSocket) -> None:
                 state.last_activity_ts = time.time()
 
             e = rms_pcm16(frame)
-
+            # B) Hard barge-in (server-side): if user starts talking while TTS is playing, stop TTS immediately.
+            # This is independent of the client "barge_in" text event.
+            if state.tts_task and not state.tts_task.done() and e >= BARGE_IN_RMS:
+                tnow = time.time()
+                state.last_activity_ts = tnow
+                state.last_agent_speech_end_ts = tnow
+                try:
+                    state.tts_task.cancel()
+                except Exception:
+                    pass
+                await clear_audio_queue(ws)
+                # Do NOT continue; still feed VAD so we capture the user's utterance.
             # Flush pending utter if the pause-merge window elapsed
             if pending_utter is not None and time.time() >= pending_deadline_ts:
                 tnow = time.time()
@@ -527,7 +547,10 @@ async def _handle_ws(ws: WebSocket) -> None:
                     pending_utter = utter
                 else:
                     pending_utter += utter
-                pending_deadline_ts = tnow + PAUSE_MERGE_SEC
+                # Adaptive grace window: short utterances are often stutters/fragments,
+                # so wait longer before flushing to STT to avoid interrupting the user.
+                grace = PAUSE_MERGE_SEC_FRAGMENT if (pending_utter and len(pending_utter) <= FRAGMENT_MAX_BYTES) else PAUSE_MERGE_SEC
+                pending_deadline_ts = tnow + grace
                 continue
 
     except Exception as e:
