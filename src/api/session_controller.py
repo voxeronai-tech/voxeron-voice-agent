@@ -2333,6 +2333,22 @@ class SessionController:
             out = await llm_turn(self.oa, st, transcript, menu_context)
             reply = (out.get("reply") or "").strip()
 
+            # If the LLM turn mutated the cart, we must close the loop deterministically.
+            # This prevents "Let me update your order..." dead-ends where the client waits forever.
+            cart_after_llm = st.order.summary(st.menu) if st.menu else ""
+            if st.menu and cart_after_llm and cart_after_llm != (cart_before or ""):
+                # Avoid double-speaking the same cart-check snapshot if already active
+                if not (st.pending_cart_check and st.cart_check_snapshot == cart_after_llm):
+                    reply = (
+                        f"Done. Your order is now: {cart_after_llm}. {self._say_anything_else()}"
+                        if st.lang != "nl"
+                        else f"Goed. Je bestelling is nu: {cart_after_llm}. {self._say_anything_else()}"
+                    )
+                # If there was a pending cart check with an older snapshot, refresh it
+                # (keeps state coherent for yes/no)
+                st.pending_cart_check = False
+                st.cart_check_snapshot = ""
+
             if reply and not detect_explicit_remove_intent(transcript, st.lang):
                 if any(x in reply.lower() for x in ["remove", "cancel", "take off", "delete", "verwijder", "haal weg", "annuleer", "schrap"]):
                     reply = "Sorry — did you want to add something, or change your order?" if st.lang != "nl" else "Sorry — wil je iets toevoegen, of je bestelling wijzigen?"
