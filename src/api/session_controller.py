@@ -52,12 +52,15 @@ FULFILLMENT_STT_PROMPT_NL = (
 )
 
 NAME_STT_PROMPT = (
-    "The user is giving their name for a restaurant order. "
-    "This is likely a short name (e.g., Jerry, Marcel, Tom, Sara). "
-    "Transcribe the name exactly. "
-    "Do NOT turn it into commands like 'ik wil bestellen', 'pickup', or 'delivery'."
+    "CONTEXT: The user is providing their name for a restaurant order. "
+    "GOAL: Extract and return ONLY the proper name (e.g., 'Arjan', 'Priya', 'van den Berg'). "
+    "1. FORMAT: Return only the name. No prefixes like 'My name is' / 'mijn naam is', and no conversational filler. "
+    "2. ACCURACY: Preserve original spelling, diacritics (é, ö, etc.), and Dutch spacing (e.g., 'de Boer' stays 'de Boer'). "
+    "3. NO TRANSLATION: Do not translate or anglicize names. "
+    "4. FILTER: If the audio does not contain a name (e.g., user says 'bestellen', 'pickup', 'delivery', or it's noise), return an empty string ''. "
+    "5. SPELLING: If the user spells their name out (e.g., 'A-N-N-A'), return the assembled name 'Anna'. "
+    "6. CHARACTERS: Keep common name punctuation when spoken (apostrophes, hyphens) if present."
 )
-
 
 NAAN_VARIANT_STT_PROMPT_EN = (
     "The user is choosing a naan type. "
@@ -241,6 +244,40 @@ def _looks_like_stt_prompt_dump(text: str) -> bool:
     if has_many_commas and not has_order_verb:
         return True
     return False
+
+def _address_name(full_name: str) -> Optional[str]:
+    """
+    Returns a safe first name to address the user,
+    or None if we should avoid using a name.
+    """
+    if not full_name:
+        return None
+
+    raw = full_name.strip()
+    tn = norm_simple(raw)
+
+    # Reject org-like names
+    for tok in ORG_TOKENS:
+        if f" {tok} " in f" {tn} ":
+            return None
+
+    parts = raw.split()
+    if not (1 <= len(parts) <= 2):
+        return None
+
+    first = parts[0]
+
+    # Must look like a human first name
+    if len(first) < 2:
+        return None
+    if not first[0].isalpha():
+        return None
+    if any(ch.isdigit() for ch in first):
+        return None
+    if first.isupper():
+        return None
+
+    return first
 
 
 _QTY_WORDS: Dict[str, int] = {
@@ -462,6 +499,27 @@ _VARIANT_TOKS = {
     "peshawari": {"peshawari"},
 }
 
+ORG_TOKENS = {
+    # Existing
+    "stichting", "vereniging", "bv", "b.v.", "nv", "n.v.",
+    "foundation", "company", "ltd", "inc", "corp",
+    "zorg", "school", "kerk", "gemeente",
+    
+    # Legal - Dutch/Belgian
+    "vof", "v.o.f.", "cv", "c.v.", "maatschap", "coöperatie", "vve", "vzw", "asbl",
+    
+    # Legal - English/International
+    "llc", "llp", "plc", "gmbh", "ag", "sa", "sarl", "se", "partnership",
+    
+    # Institutional
+    "ziekenhuis", "hospital", "kliniek", "clinic", "universiteit", "university",
+    "instituut", "institute", "academie", "academy", "ministerie", "provincie",
+    "bibliotheek", "museum", "federatie", "bank",
+    
+    # General Business
+    "group", "groep", "holding", "holdings", "partners", "solutions", 
+    "consulting", "services", "agency", "international", "global", "industries"
+}
 
 def _extract_nan_variant_keyword_scoped(text: str) -> Optional[str]:
     t = norm_simple(text)
@@ -570,8 +628,8 @@ class SessionController:
     def _is_checkout_intent(self, text: str) -> bool:
         t = " " + norm_simple(text) + " "
         keys = [
-            " that's all ", " thatll be all ", " that'll be all ", " all good ", " all set ",
-            " that's it ", " thats it ", " finished ", " done ", " complete ",
+            " that's all ", " that s all ", " that s all ", " thatll be all ", " that'll be all ", " that ll be all ", " that ll be all ", " all good ", " all set ",
+            " that's it ", " that s it ", " that s it ", " thats it ", " finished ", " done ", " complete ",
             " klaar ", " klaar hoor ", " dat is alles ", " dat is alles hoor ", " klaar ermee ",
             " order is complete ", " place the order ", " confirm the order ",
         ]
@@ -598,7 +656,7 @@ class SessionController:
     def _is_done_intent(self, text: str) -> bool:
         t = " " + norm_simple(text) + " "
         done = [
-            " that will be all ", " that'll be all ", " thats all ", " that's all ", " all good ", " that's it ",
+            " that will be all ", " that'll be all ", " that ll be all ", " thats all ", " that's all ", " that s all ", " that s all ", " all good ", " that's it ", " that s it ", " that s it ",
             " no that's all ", " no thats all ", " no thank you ", " no thanks ", " nothing else ",
             " klaar ", " klaar hoor ", " dat is alles ", " dat was alles ", " nee dat is alles ", " nee hoor dat is alles ",
             " bestelling is klaar ", " order is complete ", " order complete ",
@@ -637,7 +695,7 @@ class SessionController:
     def _is_order_complete_intent(self, text: str) -> bool:
         t = " " + norm_simple(text) + " "
         keys = [
-            " order is complete ", " that's all ", " that is all ", " done ", " finish ", " finished ", " complete the order ", " place the order ",
+            " order is complete ", " that's all ", " that s all ", " that s all ", " that is all ", " done ", " finish ", " finished ", " complete the order ", " place the order ",
             " dat is alles ", " klaar ", " afronden ", " bestelling is klaar ", " rond de bestelling af ",
         ]
         return any(k in t for k in keys)
@@ -1368,6 +1426,24 @@ class SessionController:
             transcript = (transcript or "").strip()
             now_ts = time.time()
 
+            # RC3: prevent Dutch bleed in EN sessions on Taj normal speech.
+            # If STT returns clear Dutch tokens while lang=en, retry with strict English lock + no tenant prompt.
+            if st.tenant_ref == "taj_mahal" and st.lang == "en" and transcript:
+                t_norm_chk = " " + norm_simple(transcript) + " "
+                dutch_hits = [
+                    " in plaats van ", " kan ik ", " ik wil ", " graag ", " bestelling ", " afhalen ",
+                    " bezorgen ", " prijs ", " totaal ", " twee ", " een ",
+                ]
+                if sum(1 for k in dutch_hits if k in t_norm_chk) >= 2:
+                    try:
+                        retry = await self.oa.transcribe_pcm(pcm, "en", prompt=None)
+                        retry = (retry or "").strip()
+                        if retry:
+                            logger.info("RC3: STT dutch-bleed retry en_locked: before=%r after=%r", transcript, retry)
+                            transcript = retry
+                    except Exception:
+                        pass
+
             # RC3: merge short incomplete prefixes like "I'd like ..." across a brief pause
             if getattr(st, "pending_prefix", None) and now_ts < float(getattr(st, "pending_prefix_deadline", 0.0) or 0.0):
                 transcript = f"{st.pending_prefix} {transcript}".strip()
@@ -1753,12 +1829,13 @@ class SessionController:
                     await self._speak(ws, msg)
                     return
                 st.customer_name = name_clean
-
                 st.pending_name = False
+
+                safe = _address_name((st.customer_name or "").strip())
                 msg = (
-                    f"Thank you, {st.customer_name}. {self._say_anything_else()}"
+                    (f"Thank you, {safe}." if safe else "Thank you.")
                     if st.lang != "nl"
-                    else f"Dank je, {st.customer_name}. {self._say_anything_else()}"
+                    else (f"Dank je, {safe}." if safe else "Dank je.")
                 )
                 await self._speak(ws, msg)
                 return
@@ -1811,10 +1888,20 @@ class SessionController:
                 st.order_finalized = True
                 cart = st.order.summary(st.menu) or ""
                 mode_part = st.fulfillment_mode
+                safe = _address_name((st.customer_name or "").strip())
+
                 if st.lang != "nl":
-                    await self._speak(ws, f"Perfect. Your {mode_part} order under {st.customer_name} is confirmed. {('Order: ' + cart + '. ') if cart else ''}Thank you!")
+                    name_part = f" under {safe}" if safe else ""
+                    await self._speak(
+                        ws,
+                        f"Perfect. Your {mode_part} order{name_part} is confirmed. {('Order: ' + cart + '. ') if cart else ''}Thank you!"
+                    )
                 else:
-                    await self._speak(ws, f"Top. Je {mode_part} bestelling op naam van {st.customer_name} is bevestigd. {('Bestelling: ' + cart + '. ') if cart else ''}Dank je wel!")
+                    name_part = f" op naam van {safe}" if safe else ""
+                    await self._speak(
+                        ws,
+                        f"Top. Je {mode_part} bestelling{name_part} is bevestigd. {('Bestelling: ' + cart + '. ') if cart else ''}Dank je wel!"
+                    )
                 return
 
                         # ==========================================================
@@ -1843,10 +1930,21 @@ class SessionController:
                 if self._is_affirm(transcript):
                     st.pending_confirm = False
                     st.order_finalized = True
+                    safe = _address_name((st.customer_name or "").strip())
                     if st.lang != "nl":
-                        await self._speak(ws, f"Perfect. Your order is confirmed for pickup under {st.customer_name or 'your name'}.")
+                        await self._speak(
+                            ws,
+                            f"Perfect. Your order is confirmed for pickup under {safe}."
+                            if safe
+                            else "Perfect. Your order is confirmed for pickup."
+                        )
                     else:
-                        await self._speak(ws, f"Top. Je bestelling is bevestigd voor afhalen op naam van {st.customer_name or 'jou'}.")
+                        await self._speak(
+                            ws,
+                            f"Top. Je bestelling is bevestigd voor afhalen op naam van {safe}."
+                            if safe
+                            else "Top. Je bestelling is bevestigd voor afhalen."
+                        )
                     return
                 if self._is_negative(transcript):
                     st.pending_confirm = False
@@ -1942,7 +2040,7 @@ class SessionController:
                 await self.clear_thinking(ws)
                 if st.fulfillment_mode == "pickup":
                     if st.customer_name:
-                        await self._speak(ws, f"You're set for pickup under {st.customer_name}. {self._say_anything_else()}" if st.lang != "nl" else f"Je staat op afhalen op naam van {st.customer_name}. {self._say_anything_else()}")
+                        await self._speak(ws, f"You're set for pickup under {st.customer_name}." if st.lang != "nl" else f"Je staat op afhalen op naam van {st.customer_name}.")
                     else:
                         st.pending_name = True
                         await self._speak(ws, "Great. What name should I put the order under?" if st.lang != "nl" else "Prima. Op welke naam mag ik de bestelling zetten?")
@@ -2257,7 +2355,7 @@ class SessionController:
                 # Only start checkout if the user explicitly indicates they're done / want to place the order.
                 t_norm = " " + norm_simple(transcript) + " "
                 checkout_intent = any(k in t_norm for k in [
-                    " that's all ", " that is all ", " thats all ", " that's it ", " thats it ",
+                    " that's all ", " that s all ", " that s all ", " that is all ", " thats all ", " that's it ", " that s it ", " that s it ", " thats it ",
                     " nothing else ", " no more ", " done ", " finish ", " finalize ",
                     " checkout ", " check out ", " place the order ", " confirm ", " complete the order ",
                     " dat is alles ", " dat was alles ", " niks meer ", " niets meer ", " klaar ",
@@ -2282,7 +2380,7 @@ class SessionController:
             if st.menu:
                 t_norm = " " + norm_simple(transcript) + " "
                 checkout_intent = any(k in t_norm for k in [
-                    " that's all ", " that is all ", " thats all ", " that's it ", " thats it ",
+                    " that's all ", " that s all ", " that s all ", " that is all ", " thats all ", " that's it ", " that s it ", " that s it ", " thats it ",
                     " nothing else ", " no more ", " done ", " finish ", " finalize ",
                     " checkout ", " check out ", " place the order ", " confirm ", " complete the order ",
                     " dat is alles ", " dat was alles ", " niks meer ", " niets meer ", " klaar ",
