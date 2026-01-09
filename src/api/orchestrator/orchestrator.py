@@ -69,12 +69,5 @@ class CognitiveOrchestrator:
 
     @staticmethod
     def _default_responder(pr: ParserResult) -> str:
-        me = pr.matched_entity
-        if isinstance(me, dict):
-            action = (me.get('action') or '').upper()
-            if action == 'SET_QTY':
-                qty = me.get('quantity')
-                return f"Got it — quantity set to {qty}."
-            return "Got it."
-        entity = me or "that"
+        entity = pr.matched_entity or "that"
         return f"Got it — {entity}."

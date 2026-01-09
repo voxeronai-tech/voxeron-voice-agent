@@ -437,11 +437,6 @@ async def _handle_ws(ws: WebSocket) -> None:
     )
     started = time.time()
 
-    # RC3: merge split user turns across short pauses (prevents agent interrupting)
-    pending_utter: bytes | None = None
-    pending_deadline_ts: float = 0.0
-    PAUSE_MERGE_SEC = 1.8
-
     try:
         while True:
             # ✅ Robust disconnect handling: Starlette can either raise WebSocketDisconnect,
@@ -499,9 +494,8 @@ async def _handle_ws(ws: WebSocket) -> None:
                 state.last_activity_ts = time.time()
 
             e = rms_pcm16(frame)
-
-            # Flush pending utter if the pause-merge window elapsed
-            if pending_utter is not None and time.time() >= pending_deadline_ts:
+            utter = vad.feed(frame, e)
+            if utter:
                 tnow = time.time()
                 state.last_activity_ts = tnow
                 setattr(state, "last_user_utter_end_ts", tnow)
@@ -512,23 +506,7 @@ async def _handle_ws(ws: WebSocket) -> None:
                     except Exception:
                         pass
 
-                state.proc_task = asyncio.create_task(controller.process_utterance(ws, pending_utter))
-                pending_utter = None
-                pending_deadline_ts = 0.0
-
-            utter = vad.feed(frame, e)
-            if utter:
-                tnow = time.time()
-                state.last_activity_ts = tnow
-                setattr(state, "last_user_utter_end_ts", tnow)
-
-                # RC3: merge short pauses into a single user turn
-                if pending_utter is None:
-                    pending_utter = utter
-                else:
-                    pending_utter += utter
-                pending_deadline_ts = tnow + PAUSE_MERGE_SEC
-                continue
+                state.proc_task = asyncio.create_task(controller.process_utterance(ws, utter))
 
     except Exception as e:
         logger.exception("ws loop error: %s", e)
