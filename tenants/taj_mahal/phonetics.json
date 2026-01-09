@@ -1,21 +1,81 @@
 {
   "gates": {
-    "naam_to_naan": false
+    "naam_to_naan": true
   },
   "patterns": {
     "*": [
-      { "pattern": "\\bnederl[âa]ns\\b", "replace": "Nederlands", "flags": ["I"] },
-      { "pattern": "\\bnederlants\\b", "replace": "Nederlands", "flags": ["I"] },
-      { "pattern": "\\bnee\\s*de\\s*lons\\b", "replace": "Nederlands", "flags": ["I"] },
-      { "pattern": "\\bplanar\\b", "replace": "plain", "flags": ["I"] },
-      { "pattern": "\\bplainar\\b", "replace": "plain", "flags": ["I"] },
-      { "pattern": "\\bplainer\\b", "replace": "plain", "flags": ["I"] }
+      {
+        "pattern": "\\bnederl[âa]ns\\b",
+        "replace": "Nederlands",
+        "flags": [
+          "I"
+        ]
+      },
+      {
+        "pattern": "\\bnederlants\\b",
+        "replace": "Nederlands",
+        "flags": [
+          "I"
+        ]
+      },
+      {
+        "pattern": "\\bnee\\s*de\\s*lons\\b",
+        "replace": "Nederlands",
+        "flags": [
+          "I"
+        ]
+      },
+      {
+        "pattern": "\\bplanar\\b",
+        "replace": "plain",
+        "flags": [
+          "I"
+        ]
+      },
+      {
+        "pattern": "\\bplainar\\b",
+        "replace": "plain",
+        "flags": [
+          "I"
+        ]
+      },
+      {
+        "pattern": "\\bplainer\\b",
+        "replace": "plain",
+        "flags": [
+          "I"
+        ]
+      }
     ],
     "nl": [
-      { "pattern": "\\breis\\b", "replace": "rijst", "flags": ["I"] },
-      { "pattern": "\\brijs\\b", "replace": "rijst", "flags": ["I"] },
-      { "pattern": "\\blamp\\b", "replace": "lamb", "flags": ["I"] },
-      { "pattern": "\\blam\\b", "replace": "lamb", "flags": ["I"] }
+      {
+        "pattern": "\\breis\\b",
+        "replace": "rijst",
+        "flags": [
+          "I"
+        ]
+      },
+      {
+        "pattern": "\\brijs\\b",
+        "replace": "rijst",
+        "flags": [
+          "I"
+        ]
+      },
+      {
+        "pattern": "\\blamp\\b",
+        "replace": "lamb",
+        "flags": [
+          "I"
+        ]
+      },
+      {
+        "pattern": "\\blam\\b",
+        "replace": "lamb",
+        "flags": [
+          "I"
+        ]
+      }
     ]
   }
 }

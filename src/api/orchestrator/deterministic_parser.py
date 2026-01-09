@@ -1,23 +1,23 @@
 from __future__ import annotations
 
-import re
 import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
-from .parser_types import ParserResult, ParserStatus, ReasonCode, MatchKind
+from src.api.parser.types import ParserResult, ParserStatus, ReasonCode
 
 
 class DeterministicParser:
     """
-    Sprint-1 deterministic parser (RC3 hardened):
-      - normalizes BOTH utterance and alias keys
-      - exact alias match (O(1) dict lookup)
-      - stable typed result
-      - no side effects
+    Deterministic alias parser.
+
+    RC1-2 contract:
+    - No MatchKind / matched_value fields
+    - Return canonical ParserResult (status, reason_code, matched_entity, confidence, execution_time_ms)
+    - Never raise; failures become NO_MATCH so orchestrator can fall back to LLM safely
     """
 
     def __init__(self, alias_map: Dict[str, str]):
-        # Pre-normalize keys once at init
+        # Store normalized keys for exact lookup
         self.alias_map: Dict[str, str] = {}
         for k, v in (alias_map or {}).items():
             nk = self._norm(k)
@@ -25,96 +25,72 @@ class DeterministicParser:
                 self.alias_map[nk] = v
 
     def parse(self, utterance: str) -> ParserResult:
-        start = time.perf_counter()
+        t0 = time.perf_counter()
+        try:
+            norm = self._norm(utterance)
+            if not norm:
+                return ParserResult(
+                    status=ParserStatus.NO_MATCH,
+                    reason_code=ReasonCode.EMPTY_INPUT,
+                    matched_entity=None,
+                    confidence=0.0,
+                    execution_time_ms=round((time.perf_counter() - t0) * 1000.0, 3),
+                )
 
-        norm = self._norm(utterance)
-        if not norm:
-            return self._result(
+            matched: Optional[str] = self.alias_map.get(norm)
+            if matched is not None:
+                return ParserResult(
+                    status=ParserStatus.MATCH,
+                    reason_code=ReasonCode.OK,
+                    matched_entity=matched,
+                    confidence=1.0,
+                    execution_time_ms=round((time.perf_counter() - t0) * 1000.0, 3),
+                )
+
+            # RC1-3: deterministic quantity/update intent (no LLM)
+            # Only trigger when update markers are present to avoid hijacking normal ordering.
+            from src.api.parser.quantity import extract_quantity_1_to_10
+
+            qty = extract_quantity_1_to_10(utterance)
+            if qty is not None:
+                t = (utterance or '').lower()
+                update_markers = (
+                    # EN
+                    'make it', 'change to', 'instead of', 'rather than',
+                    # NL
+                    'maak het', 'maak er', 'doe er', 'in plaats van',
+                )
+                if any(m in t for m in update_markers):
+                    return ParserResult(
+                        status=ParserStatus.MATCH,
+                        reason_code=ReasonCode.OK,
+                        matched_entity={'action': 'SET_QTY', 'quantity': qty},
+                        confidence=1.0,
+                        execution_time_ms=round((time.perf_counter() - t0) * 1000.0, 3),
+                    )
+
+            return ParserResult(
                 status=ParserStatus.NO_MATCH,
-                reason=ReasonCode.EMPTY_INPUT,
-                entity=None,
-                kind=MatchKind.ENTITY,
-                value=None,
-                start=start,
+                reason_code=ReasonCode.NO_ALIAS,
+                matched_entity=None,
+                confidence=0.0,
+                execution_time_ms=round((time.perf_counter() - t0) * 1000.0, 3),
             )
 
-        matched: Optional[str] = self.alias_map.get(norm)
-        if matched is not None:
-            # If you later adopt special intent tokens, you can type them here.
-            kind, value, entity = self._classify(matched)
-            return self._result(
-                status=ParserStatus.MATCH,
-                reason=ReasonCode.EXACT_ALIAS_MATCH,
-                entity=entity,
-                kind=kind,
-                value=value,
-                start=start,
+        except Exception:
+            return ParserResult(
+                status=ParserStatus.NO_MATCH,
+                reason_code=ReasonCode.PARSE_ERROR,
+                matched_entity=None,
+                confidence=0.0,
+                execution_time_ms=round((time.perf_counter() - t0) * 1000.0, 3),
             )
-
-        return self._result(
-            status=ParserStatus.NO_MATCH,
-            reason=ReasonCode.NO_ALIAS_FOUND,
-            entity=None,
-            kind=MatchKind.ENTITY,
-            value=None,
-            start=start,
-        )
-
-    @staticmethod
-    def _classify(matched: str) -> Tuple[MatchKind, Optional[str], Optional[str]]:
-        """
-        Backward compatible behavior:
-          - default: treat matched string as an ENTITY name.
-        Optional convention support:
-          - "__INTENT__:pickup" -> kind=INTENT, value="pickup"
-          - "__VALUE__:something" -> kind=VALUE, value="something"
-        """
-        m = (matched or "").strip()
-        if m.startswith("__INTENT__:"):
-            return (MatchKind.INTENT, m.split(":", 1)[1].strip() or None, None)
-        if m.startswith("__VALUE__:"):
-            return (MatchKind.VALUE, m.split(":", 1)[1].strip() or None, None)
-        return (MatchKind.ENTITY, None, m)
 
     @staticmethod
     def _norm(text: str) -> str:
-        """
-        STT-safe normalizer:
-        - lowercase
-        - remove punctuation
-        - collapse whitespace
-        - unify 'pick up' -> 'pickup'
-        """
+        # Keep behavior stable with previous alias normalization:
+        # lowercase, strip, collapse whitespace.
         if not text:
             return ""
-        t = text.strip().lower()
-
-        # Unify common STT variants
-        t = t.replace("pick up", "pickup")
-        t = t.replace("take away", "takeaway")
-
-        # Replace non-word (punctuation etc.) with spaces
-        t = re.sub(r"[^\w\s]", " ", t, flags=re.UNICODE)
-        t = re.sub(r"\s+", " ", t, flags=re.UNICODE).strip()
+        t = " ".join(str(text).strip().lower().split())
         return t
-
-    @staticmethod
-    def _result(
-        *,
-        status: ParserStatus,
-        reason: ReasonCode,
-        entity: Optional[str],
-        kind: MatchKind,
-        value: Optional[str],
-        start: float,
-    ) -> ParserResult:
-        elapsed_ms = (time.perf_counter() - start) * 1000.0
-        return ParserResult(
-            status=status,
-            reason=reason,
-            matched_entity=entity,
-            execution_time_ms=round(elapsed_ms, 3),
-            matched_kind=kind,
-            matched_value=value,
-        )
-

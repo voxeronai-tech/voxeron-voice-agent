@@ -52,12 +52,15 @@ FULFILLMENT_STT_PROMPT_NL = (
 )
 
 NAME_STT_PROMPT = (
-    "The user is giving their name for a restaurant order. "
-    "This is likely a short name (e.g., Jerry, Marcel, Tom, Sara). "
-    "Transcribe the name exactly. "
-    "Do NOT turn it into commands like 'ik wil bestellen', 'pickup', or 'delivery'."
+    "CONTEXT: The user is providing their name for a restaurant order. "
+    "GOAL: Extract and return ONLY the proper name (e.g., 'Arjan', 'Priya', 'van den Berg'). "
+    "1. FORMAT: Return only the name. No prefixes like 'My name is' / 'mijn naam is', and no conversational filler. "
+    "2. ACCURACY: Preserve original spelling, diacritics (é, ö, etc.), and Dutch spacing (e.g., 'de Boer' stays 'de Boer'). "
+    "3. NO TRANSLATION: Do not translate or anglicize names. "
+    "4. FILTER: If the audio does not contain a name (e.g., user says 'bestellen', 'pickup', 'delivery', or it's noise), return an empty string ''. "
+    "5. SPELLING: If the user spells their name out (e.g., 'A-N-N-A'), return the assembled name 'Anna'. "
+    "6. CHARACTERS: Keep common name punctuation when spoken (apostrophes, hyphens) if present."
 )
-
 
 NAAN_VARIANT_STT_PROMPT_EN = (
     "The user is choosing a naan type. "
@@ -242,6 +245,108 @@ def _looks_like_stt_prompt_dump(text: str) -> bool:
         return True
     return False
 
+def _address_name(full_name: str) -> Optional[str]:
+    """
+    Returns a safe first name to address the user,
+    or None if we should avoid using a name.
+    """
+    if not full_name:
+        return None
+
+    raw = full_name.strip()
+    tn = norm_simple(raw)
+
+    # Reject org-like names
+    for tok in ORG_TOKENS:
+        if f" {tok} " in f" {tn} ":
+            return None
+
+    parts = raw.split()
+    if not (1 <= len(parts) <= 2):
+        return None
+
+    first = parts[0]
+
+    # Must look like a human first name
+    if len(first) < 2:
+        return None
+    if not first[0].isalpha():
+        return None
+    if any(ch.isdigit() for ch in first):
+        return None
+    if first.isupper():
+        return None
+
+    return first
+
+
+_QTY_WORDS: Dict[str, int] = {
+    # NL
+    "een": 1,
+    "één": 1,
+    "twee": 2,
+    "drie": 3,
+    "vier": 4,
+    "vijf": 5,
+    "zes": 6,
+    "zeven": 7,
+    "acht": 8,
+    "negen": 9,
+    "tien": 10,
+    # EN
+    "a": 1,
+    "an": 1,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
+
+
+def _qty_near_span(t_norm: str, span_start: int, span_end: int) -> Optional[int]:
+    """Deterministic local quantity detector near an alias match span."""
+    toks = [(m.group(0), m.start(), m.end()) for m in re.finditer(r"[A-Za-zÀ-ÿ0-9]+", t_norm)]
+    if not toks:
+        return None
+
+    idx = None
+    for i, (_tok, s0, e0) in enumerate(toks):
+        if not (e0 <= span_start or s0 >= span_end):
+            idx = i
+            break
+    if idx is None:
+        return None
+
+    left = max(0, idx - 3)
+    right = min(len(toks) - 1, idx + 1)
+
+    # Prefer left-side qty ("two naan", "twee naan")
+    for i in range(idx - 1, left - 1, -1):
+        tok = toks[i][0].lower()
+        if tok.isdigit():
+            q = int(tok)
+            return q if 1 <= q <= 20 else None
+        if tok in _QTY_WORDS:
+            return _QTY_WORDS[tok]
+
+    # Also accept "naan x2" / "naan 2x"
+    for i in range(idx, right + 1):
+        tok = toks[i][0].lower()
+        if tok.endswith("x") and tok[:-1].isdigit():
+            q = int(tok[:-1])
+            return q if 1 <= q <= 20 else None
+        if tok.startswith("x") and tok[1:].isdigit():
+            q = int(tok[1:])
+            return q if 1 <= q <= 20 else None
+
+    return None
+
 
 def parse_add_item(menu: MenuSnapshot, text: str, *, qty: int) -> List[Tuple[str, int]]:
     """
@@ -273,7 +378,7 @@ def parse_add_item(menu: MenuSnapshot, text: str, *, qty: int) -> List[Tuple[str
 
     candidates.sort(key=lambda x: (-(x[1] - x[0]), x[0]))
 
-    chosen: List[Tuple[str, int]] = []
+    chosen_spans: List[Tuple[str, int, int]] = []  # (item_id, start, end)
     used_item_ids = set()
     used_spans: List[Tuple[int, int]] = []
 
@@ -289,9 +394,22 @@ def parse_add_item(menu: MenuSnapshot, text: str, *, qty: int) -> List[Tuple[str
             continue
         used_item_ids.add(item_id)
         used_spans.append((s0, e0))
-        chosen.append((item_id, q))
+        chosen_spans.append((item_id, s0, e0))
 
-    return chosen
+    if not chosen_spans:
+        return []
+
+    multi_item = (len({iid for (iid, _s, _e) in chosen_spans}) > 1)
+
+    out: List[Tuple[str, int]] = []
+    for item_id, s0, e0 in chosen_spans:
+        local_q = _qty_near_span(t, s0, e0)
+        if local_q is not None:
+            out.append((item_id, local_q))
+        else:
+            out.append((item_id, 1 if multi_item else q))
+
+    return out
 
 
 LLM_SYSTEM_BASE = """
@@ -349,16 +467,22 @@ def build_llm_messages(state: SessionState, user_text: str, menu_context: str) -
         + f"\nCURRENT_CART: [{cart_str}]"
         + f"\nMENU_CONTEXT:\n{menu_context}"
     )
+
+    # RC3: enforce output language when language is locked (prevents NL drift on "ja/maak het")
+    if getattr(state, "lang_locked", False):
+        if getattr(state, "lang", "en") == "nl":
+            sys += "\n\nOUTPUT_LANGUAGE: nl\nReturn the reply in Dutch only. Do not switch languages."
+        else:
+            sys += "\n\nOUTPUT_LANGUAGE: en\nReturn the reply in English only. Do not switch languages."
+
     sys = _policy_guard_append(state, sys)
     return [{"role": "system", "content": sys}, {"role": "user", "content": user_text}]
-
 
 async def llm_turn(oa: OpenAIClient, state: SessionState, user_text: str, menu_context: str) -> Dict[str, Any]:
     msgs = build_llm_messages(state, user_text, menu_context)
     txt = await oa.chat(msgs, temperature=0.2)
     obj = _safe_json_loads(txt)
     return obj if obj else {"reply": txt, "add": [], "remove": []}
-
 
 # -------------------------
 # Naan keyword parsing (SCOPED)
@@ -370,12 +494,32 @@ _PLAIN_LIKE = {
 }
 _VARIANT_TOKS = {
     "garlic": {"garlic", "knoflook"},
-    "butter": {"butter", "boter"},
     "cheese": {"cheese", "kaas"},
     "keema": {"keema", "kheema"},
     "peshawari": {"peshawari"},
 }
 
+ORG_TOKENS = {
+    # Existing
+    "stichting", "vereniging", "bv", "b.v.", "nv", "n.v.",
+    "foundation", "company", "ltd", "inc", "corp",
+    "zorg", "school", "kerk", "gemeente",
+    
+    # Legal - Dutch/Belgian
+    "vof", "v.o.f.", "cv", "c.v.", "maatschap", "coöperatie", "vve", "vzw", "asbl",
+    
+    # Legal - English/International
+    "llc", "llp", "plc", "gmbh", "ag", "sa", "sarl", "se", "partnership",
+    
+    # Institutional
+    "ziekenhuis", "hospital", "kliniek", "clinic", "universiteit", "university",
+    "instituut", "institute", "academie", "academy", "ministerie", "provincie",
+    "bibliotheek", "museum", "federatie", "bank",
+    
+    # General Business
+    "group", "groep", "holding", "holdings", "partners", "solutions", 
+    "consulting", "services", "agency", "international", "global", "industries"
+}
 
 def _extract_nan_variant_keyword_scoped(text: str) -> Optional[str]:
     t = norm_simple(text)
@@ -484,8 +628,8 @@ class SessionController:
     def _is_checkout_intent(self, text: str) -> bool:
         t = " " + norm_simple(text) + " "
         keys = [
-            " that's all ", " thatll be all ", " that'll be all ", " all good ", " all set ",
-            " that's it ", " thats it ", " finished ", " done ", " complete ",
+            " that's all ", " that s all ", " that s all ", " thatll be all ", " that'll be all ", " that ll be all ", " that ll be all ", " all good ", " all set ",
+            " that's it ", " that s it ", " that s it ", " thats it ", " finished ", " done ", " complete ",
             " klaar ", " klaar hoor ", " dat is alles ", " dat is alles hoor ", " klaar ermee ",
             " order is complete ", " place the order ", " confirm the order ",
         ]
@@ -512,7 +656,7 @@ class SessionController:
     def _is_done_intent(self, text: str) -> bool:
         t = " " + norm_simple(text) + " "
         done = [
-            " that will be all ", " that'll be all ", " thats all ", " that's all ", " all good ", " that's it ",
+            " that will be all ", " that'll be all ", " that ll be all ", " thats all ", " that's all ", " that s all ", " that s all ", " all good ", " that's it ", " that s it ", " that s it ",
             " no that's all ", " no thats all ", " no thank you ", " no thanks ", " nothing else ",
             " klaar ", " klaar hoor ", " dat is alles ", " dat was alles ", " nee dat is alles ", " nee hoor dat is alles ",
             " bestelling is klaar ", " order is complete ", " order complete ",
@@ -551,7 +695,7 @@ class SessionController:
     def _is_order_complete_intent(self, text: str) -> bool:
         t = " " + norm_simple(text) + " "
         keys = [
-            " order is complete ", " that's all ", " that is all ", " done ", " finish ", " finished ", " complete the order ", " place the order ",
+            " order is complete ", " that's all ", " that s all ", " that s all ", " that is all ", " done ", " finish ", " finished ", " complete the order ", " place the order ",
             " dat is alles ", " klaar ", " afronden ", " bestelling is klaar ", " rond de bestelling af ",
         ]
         return any(k in t for k in keys)
@@ -613,8 +757,6 @@ class SessionController:
                 if len(words) > len(p_words):
                     return " ".join(words[len(p_words):]).strip(" .,")
         return t.strip(" .,")
-
-
 
     def _looks_like_name_answer(self, text: str) -> bool:
         t_raw = (text or "").strip()
@@ -850,7 +992,7 @@ class SessionController:
         """
         Optional RC3: deterministic parser BEFORE any LLM.
         This is intentionally conservative: only for short utterances.
-        Returns item_id if matched and added.
+        Returns item_id if matched.
         """
         if CognitiveOrchestrator is None or OrchestratorRoute is None:
             return None
@@ -871,18 +1013,77 @@ class SessionController:
         if decision.route != OrchestratorRoute.DETERMINISTIC:
             return None
 
-        # RC3 safety: only ENTITY matches are addable items.
-        # Prevents future "__INTENT__:" / "__VALUE__:" tokens from being added to cart.
-        if MatchKind is not None and getattr(decision, "matched_kind", None) != MatchKind.ENTITY:
+        # RC1-3 safety: only concrete item IDs (strings) are addable here.
+        # Deterministic payloads (e.g. qty updates) must NOT be added to cart.
+        item_id = decision.parser_result.matched_entity
+        if not isinstance(item_id, str) or not item_id:
             return None
 
-        item_id = decision.matched_entity or decision.parser_result.matched_entity
-        if not item_id:
-            return None
-
-        # Add deterministically
-        self.state.order.add(item_id, max(1, int(qty or 1)))
+        # RC3: do NOT mutate cart here.
+        # The caller decides whether/when to add to avoid double-adds.
         return item_id
+
+    def _maybe_orchestrator_apply_qty_update(self, menu: MenuSnapshot, transcript: str) -> Optional[Tuple[str, int]]:
+        """
+        RC1-3: deterministic qty/update intent BEFORE LLM.
+
+        Returns (item_id, new_qty) if applied, else None.
+
+        Conservative target selection:
+          1) if we have a recent last_added item, update that
+          2) else if exactly one item in cart, update that
+          3) else do nothing (let LLM clarify)
+        """
+        if CognitiveOrchestrator is None or OrchestratorRoute is None:
+            return None
+        if not menu:
+            return None
+
+        # Build alias map (kept consistent with _maybe_orchestrator_match_item)
+        alias_map: Dict[str, str] = dict(menu.alias_map or {})
+        if self.state.tenant_ref == "taj_mahal":
+            alias_map.update(self._taj_overlay_alias_map(menu))
+
+        orch = CognitiveOrchestrator(alias_map=alias_map)
+        decision = orch.decide(transcript)
+        if decision.route != OrchestratorRoute.DETERMINISTIC:
+            return None
+
+        payload = decision.parser_result.matched_entity
+        if not (isinstance(payload, dict) and (payload.get("action") == "SET_QTY")):
+            return None
+
+        try:
+            new_qty = int(payload.get("quantity") or 0)
+        except Exception:
+            return None
+        if new_qty <= 0:
+            return None
+
+        st = self.state
+        items = getattr(st.order, "items", None)
+        if not isinstance(items, dict) or not items:
+            return None
+
+        # 1) Prefer last-added item if available
+        try:
+            last_added = getattr(st, "last_added", None)
+            if isinstance(last_added, list) and last_added:
+                iid = last_added[0][0]
+                if isinstance(iid, str) and iid in items:
+                    items[iid] = new_qty
+                    return (iid, new_qty)
+        except Exception:
+            pass
+
+        # 2) If only one item, update it
+        if len(items) == 1:
+            iid = next(iter(items.keys()))
+            if isinstance(iid, str):
+                items[iid] = new_qty
+                return (iid, new_qty)
+
+        return None
 
     async def _load_tenant_context(self, tenant_ref: str) -> None:
         st = self.state
@@ -905,7 +1106,13 @@ class SessionController:
 
         snap: Optional[MenuSnapshot] = None
         if self.menu_store:
-            snap = await self.menu_store.get_snapshot(tenant_ref, lang="en")
+            try:
+                snap = await self.menu_store.get_snapshot(tenant_ref, lang="en")
+            except Exception as e:
+                # Never let DB/menu issues crash the audio pipeline.
+                # Hot-swap failures should degrade gracefully (stay alive, allow retry).
+                logger.exception("[tenant] get_snapshot failed tenant=%s: %s", tenant_ref, e)
+                snap = None
         st.menu = snap
         if snap:
             st.tenant_id = snap.tenant_id
@@ -944,7 +1151,17 @@ class SessionController:
             logger.exception("[offer] capture failed")
 
         await self.send_agent_text(ws, text)
-        await self.stream_tts_mp3(ws, text)
+        try:
+            await self.stream_tts_mp3(ws, text)
+        except Exception as e:
+            # RC3: never let TTS failures crash the session
+            logger.exception("RC3: TTS failed (continuing without audio)")
+
+            # ensure we don't stay in a bad speaking state
+            try:
+                await self.clear_thinking(ws)
+            except Exception:
+                pass
 
     async def stream_tts_mp3(self, ws: WebSocket, text: str) -> None:
         st = self.state
@@ -1008,6 +1225,69 @@ class SessionController:
             await self._speak(ws, self._say_naan_not_spicy())
             # keep pending_choice, do not reprompt immediately
             return True
+
+
+        # RC3: support split answers inside the naan-variant slot, e.g.
+        # "one plain naan and one garlic naan" (with per-variant quantities).
+        t_low2 = t_norm.lower()
+
+        has_plain = bool(re.search(r"\b(plain|normal|regular|gewoon|simpel|standard)\b", t_low2))
+        has_garlic = bool(re.search(r"\b(garlic|knoflook)\b", t_low2))
+
+        if has_plain and has_garlic and st.menu:
+            def _qty_tok(tok: str) -> int | None:
+                t = (tok or "").strip().lower()
+                if t.isdigit():
+                    q = int(t)
+                    return q if 1 <= q <= 20 else None
+                m = {
+                    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                    "een": 1, "één": 1, "twee": 2, "drie": 3, "vier": 4, "vijf": 5,
+                }
+                return m.get(t)
+
+            # last-match wins (handles "instead of two plain naan, one plain naan and one garlic naan")
+            p_all = re.findall(r"\b(\d+|one|two|three|four|five|een|één|twee|drie|vier|vijf)\b\s+(?:\w+\s+){0,2}?(plain|normal|regular|gewoon|simpel|standard)\s+(naan|nan)\b", t_low2)
+            g_all = re.findall(r"\b(\d+|one|two|three|four|five|een|één|twee|drie|vier|vijf)\b\s+(?:\w+\s+){0,2}?(garlic|knoflook)\s+(naan|nan)\b", t_low2)
+
+            plain_qty = _qty_tok(p_all[-1][0]) if p_all else None
+            garlic_qty = _qty_tok(g_all[-1][0]) if g_all else None
+
+            # fallback: if user says "one naan and one garlic naan", infer first qty as plain
+            if plain_qty is None:
+                mf = re.findall(r"\b(\d+|one|two|three|four|five|een|één|twee|drie|vier|vijf)\b", t_low2)
+                if mf:
+                    plain_qty = _qty_tok(mf[0])
+
+            plain_qty = int(plain_qty or 1)
+            garlic_qty = int(garlic_qty or 1)
+
+            plain_iid = self._find_naan_item_for_variant(st.menu, "plain")
+            garlic_iid = self._find_naan_item_for_variant(st.menu, "garlic")
+
+            if plain_iid and garlic_iid and plain_iid != garlic_iid:
+                st.order.set_qty(plain_iid, plain_qty)
+                st.order.set_qty(garlic_iid, garlic_qty)
+
+                # Remove any other naan ids (including generic Nan) to avoid leftovers
+                for iid in list((st.order.items or {}).keys()):
+                    if self._is_nan_item(st.menu, iid) and iid not in (plain_iid, garlic_iid):
+                        st.order.items.pop(iid, None)
+
+                st.pending_choice = None
+                st.pending_qty = 1
+                st.nan_prompt_count = 0
+                await self.clear_thinking(ws)
+
+                cart = st.order.summary(st.menu) if st.menu else ""
+                st.pending_cart_check = True
+                st.cart_check_snapshot = cart
+                await self._speak(
+                    ws,
+                    f"Okay, so that's {cart}. Is that correct?" if st.lang != "nl" else f"Oké, dus dat is: {cart}. Klopt dat?",
+                )
+                return True
+
 
         # Primary extractor expects a "naan/nan" token; use it first.
         variant = _extract_nan_variant_keyword_scoped(t_norm)
@@ -1077,10 +1357,29 @@ class SessionController:
                 # Language lock: force STT language for fulfillment (prevents NL bleed when user speaks English).
                 stt_lang = st.lang if st.lang in ("en", "nl") else "en"
                 stt_prompt = FULFILLMENT_STT_PROMPT_NL if stt_lang == "nl" else FULFILLMENT_STT_PROMPT_EN
+
                 try:
                     transcript = await self.oa.transcribe_pcm(pcm, stt_lang, prompt=stt_prompt)
                 except Exception:
                     transcript = ""
+
+                # RC3: Fulfillment slot is STRICT.
+                # Only accept pickup/delivery. If STT drifts to generic "order" phrases,
+                # treat it as NO ANSWER so the slot stays active and we reprompt.
+                if transcript:
+                    tn = " " + norm_simple(transcript) + " "
+
+                    if re.search(r"\b(pickup|pick up|afhalen|afhaal)\b", tn):
+                        transcript = "pickup"
+                    elif re.search(r"\b(delivery|bezorgen|bezorging|thuisbezorg)\b", tn):
+                        transcript = "delivery"
+                    else:
+                        # Ignore common STT bias outputs in this slot.
+                        if re.search(
+                            r"\b(ik wil bestellen|bestellen|i want to order|want to order|place an order)\b",
+                            tn,
+                        ):
+                            transcript = ""
 
             elif st.pending_choice == "nan_variant":
                 candidates: List[Tuple[str, str]] = []  # (txt, label)
@@ -1127,6 +1426,24 @@ class SessionController:
             transcript = (transcript or "").strip()
             now_ts = time.time()
 
+            # RC3: prevent Dutch bleed in EN sessions on Taj normal speech.
+            # If STT returns clear Dutch tokens while lang=en, retry with strict English lock + no tenant prompt.
+            if st.tenant_ref == "taj_mahal" and st.lang == "en" and transcript:
+                t_norm_chk = " " + norm_simple(transcript) + " "
+                dutch_hits = [
+                    " in plaats van ", " kan ik ", " ik wil ", " graag ", " bestelling ", " afhalen ",
+                    " bezorgen ", " prijs ", " totaal ", " twee ", " een ",
+                ]
+                if sum(1 for k in dutch_hits if k in t_norm_chk) >= 2:
+                    try:
+                        retry = await self.oa.transcribe_pcm(pcm, "en", prompt=None)
+                        retry = (retry or "").strip()
+                        if retry:
+                            logger.info("RC3: STT dutch-bleed retry en_locked: before=%r after=%r", transcript, retry)
+                            transcript = retry
+                    except Exception:
+                        pass
+
             # RC3: merge short incomplete prefixes like "I'd like ..." across a brief pause
             if getattr(st, "pending_prefix", None) and now_ts < float(getattr(st, "pending_prefix_deadline", 0.0) or 0.0):
                 transcript = f"{st.pending_prefix} {transcript}".strip()
@@ -1142,33 +1459,130 @@ class SessionController:
 
             # Optima-style cart check confirmation
             if getattr(st, "pending_cart_check", False):
+                # Retry cap: never get stuck in confirmation loops if STT returns empty/unclear.
+                retries = int(getattr(st, "cart_check_retries", 0) or 0)
+
+                # Always show what STT heard during cart confirmation (helps debugging + UI transcript)
+                logger.info("STT: %s", transcript)
+
                 yn = self.oa.fast_yes_no(transcript) if hasattr(self.oa, "fast_yes_no") else None
+                # RC fix: allow "yes, ..." / "ja, ..." during cart_check and keep processing the remainder
+                t0 = (transcript or "").strip()
+                t0_low = t0.lower()
+
+                m = re.match(
+                    r"^(yes|yeah|yep|ok|okay|sure|ja|oke|prima)\b[\s,!.:-]+(.+)$",
+                    t0_low,
+                )
+                if m:
+                    yn = "AFFIRM"
+                    transcript = m.group(2).strip()
+
+                else:
+                    m2 = re.match(
+                        r"^(no|nope|nah|nee)\b[\s,!.:-]+(.+)$",
+                        t0_low,
+                    )
+                    if m2:
+                        yn = "NEGATE"
+                        transcript = m2.group(2).strip()
+
                 if yn == "AFFIRM":
                     st.pending_cart_check = False
                     st.cart_check_snapshot = None
+                    st.cart_check_retries = 0
                     await self.clear_thinking(ws)
                     await self._speak(ws, self._say_anything_else())
                     return
+
                 if yn == "NEGATE":
                     st.pending_cart_check = False
+                    st.cart_check_snapshot = None
+                    st.cart_check_retries = 0
                     await self.clear_thinking(ws)
-                    await self._speak(
-                        ws,
-                        "No problem. What would you like to change?"
-                        if st.lang != "nl"
-                        else "Geen probleem. Wat wil je aanpassen?",
-                    )
-                    return
-                # unclear response, re-ask quickly
-                cart = st.cart_check_snapshot or (st.order.summary(st.menu) if st.menu else "")
-                await self.clear_thinking(ws)
-                await self._speak(
-                    ws,
-                    f"Sorry, just to confirm: {cart}. Is that correct?"
-                    if st.lang != "nl"
-                    else f"Sorry, even checken: {cart}. Klopt dat?",
-                )
-                return
+
+                    # If they said "No, ..." and continued with the change request,
+                    # keep processing the remainder in the normal flow.
+                    if (transcript or "").strip():
+                        pass  # fall through
+                    else:
+                        await self._speak(
+                            ws,
+                            "No problem. What would you like to change?"
+                            if st.lang != "nl"
+                            else "Geen probleem. Wat wil je aanpassen?",
+                        )
+                        return
+                # Non-binary input during cart check:
+                # - If it contains a real action (add/change/remove/item mention), exit latch and process normally.
+                # - Otherwise, keep latch and reprompt yes/no (prevents accidental checkout on 'dat is alles').
+                if yn not in ("AFFIRM", "NEGATE"):
+                    t_low = (transcript or "").lower()
+
+                    has_action_words = any(k in t_low for k in (
+                        # EN
+                        " add", "another", " extra", " forgot", " instead of", " change", " make it", " remove", " cancel",
+                        " can you add", " could you add", " please add",
+                        # NL
+                        " voeg", " nog een", " extra", " vergeten", " in plaats van", " verander", " maak", " haal weg", " annuleer",
+                    ))
+
+                    action_items = []
+                    try:
+                        if st.menu:
+                            action_items = parse_add_item(st.menu, transcript, qty=1)
+                    except Exception:
+                        action_items = []
+
+                    mentions_nan2 = False
+                    has_variant2 = False
+                    try:
+                        if st.menu:
+                            mentions_nan2, has_variant2, _v2 = self._check_naan_request(st.menu, transcript)
+                    except Exception:
+                        pass
+
+                    actionable = bool(has_action_words or action_items or (mentions_nan2 and ("naan" in t_low or "nan" in t_low or has_variant2)))
+
+                    if actionable:
+                        # Exit latch and let normal flow handle the new intent (no yes/no nag loop)
+                        st.pending_cart_check = False
+                        st.cart_check_snapshot = None
+                        st.cart_check_retries = 0
+                        # fall through
+                    else:
+                        retries += 1
+                        st.cart_check_retries = retries
+
+                        cart = st.cart_check_snapshot or (st.order.summary(st.menu) if st.menu else "")
+                        await self.clear_thinking(ws)
+
+                        if retries >= 3:
+                            # Give up on explicit confirmation; continue the flow safely.
+                            st.pending_cart_check = False
+                            st.cart_check_snapshot = None
+                            st.cart_check_retries = 0
+                            if not st.fulfillment_mode:
+                                st.pending_fulfillment = True
+                                await self._speak(ws, self._say_pickup_or_delivery())
+                            else:
+                                await self._speak(ws, self._say_anything_else())
+                            return
+
+                        if retries == 2:
+                            msg = "Please say yes or no." if st.lang != "nl" else "Zeg alsjeblieft ja of nee."
+                            await self._speak(ws, msg)
+                            return
+
+                        await self._speak(
+                            ws,
+                            f"Okay, so that's {cart}. Is that correct?"
+                            if st.lang != "nl"
+                            else f"Oké, dus dat is: {cart}. Klopt dat?",
+                        )
+                        return
+
+                # AFFIRM/NEGATE handled above; if we got here, fall through
 
             if not transcript:
                 await self.clear_thinking(ws)
@@ -1184,10 +1598,12 @@ class SessionController:
             transcript = transcript.strip()
             # RC3: if output language is locked to English, normalize common Dutch "that's all" phrases
             # that STT may produce from accented English ("that'll be all" -> "dat zal alles zijn").
+            # Common NL bleed artifacts when user speaks English with accent
             if st.lang == "en":
                 transcript = re.sub(r"\bdat zal( alles)? zijn\b", "that'll be all", transcript, flags=re.IGNORECASE)
                 transcript = re.sub(r"\bdat zal het zijn\b", "that'll be all", transcript, flags=re.IGNORECASE)
                 transcript = re.sub(r"\bdat zal alles zijn\b", "that'll be all", transcript, flags=re.IGNORECASE)
+                transcript = re.sub(r"\ben\b", "and", transcript, flags=re.IGNORECASE)
 
             # RC3: acoustic alias for Dutch 'lam' -> 'lamb' to improve deterministic matching.
             transcript = re.sub(r"\blam\b", "lamb", transcript, flags=re.IGNORECASE)
@@ -1253,7 +1669,6 @@ class SessionController:
 
                         await self._speak(ws, f"I've added {label} to your order. {self._say_anything_else()}")
                         return
-
 
             # If order already completed, keep it closed (RC3 deterministic)
             if getattr(st, "order_complete", False):
@@ -1414,12 +1829,13 @@ class SessionController:
                     await self._speak(ws, msg)
                     return
                 st.customer_name = name_clean
-
                 st.pending_name = False
+
+                safe = _address_name((st.customer_name or "").strip())
                 msg = (
-                    f"Thank you, {st.customer_name}. {self._say_anything_else()}"
+                    (f"Thank you, {safe}." if safe else "Thank you.")
                     if st.lang != "nl"
-                    else f"Dank je, {st.customer_name}. {self._say_anything_else()}"
+                    else (f"Dank je, {safe}." if safe else "Dank je.")
                 )
                 await self._speak(ws, msg)
                 return
@@ -1451,8 +1867,9 @@ class SessionController:
                     await self._speak(ws, "No problem. What would you like to change?" if st.lang != "nl" else "Prima. Wat wil je wijzigen?")
                     return
 
-                await self._speak(ws, "Would you like me to place the order now?" if st.lang != "nl" else "Zal ik de bestelling nu plaatsen?")
-                return
+                logger.info("RC3: exit pending_confirm latch on non-binary input: %r", transcript)
+                st.pending_confirm = False
+                # fall through to normal flow (do NOT reprompt)
 
             # Total amount / price query: we don't have pricing, but we can summarize and offer to confirm.
             if self._is_total_amount_query(transcript) and st.menu:
@@ -1471,10 +1888,20 @@ class SessionController:
                 st.order_finalized = True
                 cart = st.order.summary(st.menu) or ""
                 mode_part = st.fulfillment_mode
+                safe = _address_name((st.customer_name or "").strip())
+
                 if st.lang != "nl":
-                    await self._speak(ws, f"Perfect. Your {mode_part} order under {st.customer_name} is confirmed. {('Order: ' + cart + '. ') if cart else ''}Thank you!")
+                    name_part = f" under {safe}" if safe else ""
+                    await self._speak(
+                        ws,
+                        f"Perfect. Your {mode_part} order{name_part} is confirmed. {('Order: ' + cart + '. ') if cart else ''}Thank you!"
+                    )
                 else:
-                    await self._speak(ws, f"Top. Je {mode_part} bestelling op naam van {st.customer_name} is bevestigd. {('Bestelling: ' + cart + '. ') if cart else ''}Dank je wel!")
+                    name_part = f" op naam van {safe}" if safe else ""
+                    await self._speak(
+                        ws,
+                        f"Top. Je {mode_part} bestelling{name_part} is bevestigd. {('Bestelling: ' + cart + '. ') if cart else ''}Dank je wel!"
+                    )
                 return
 
                         # ==========================================================
@@ -1503,10 +1930,21 @@ class SessionController:
                 if self._is_affirm(transcript):
                     st.pending_confirm = False
                     st.order_finalized = True
+                    safe = _address_name((st.customer_name or "").strip())
                     if st.lang != "nl":
-                        await self._speak(ws, f"Perfect. Your order is confirmed for pickup under {st.customer_name or 'your name'}.")
+                        await self._speak(
+                            ws,
+                            f"Perfect. Your order is confirmed for pickup under {safe}."
+                            if safe
+                            else "Perfect. Your order is confirmed for pickup."
+                        )
                     else:
-                        await self._speak(ws, f"Top. Je bestelling is bevestigd voor afhalen op naam van {st.customer_name or 'jou'}.")
+                        await self._speak(
+                            ws,
+                            f"Top. Je bestelling is bevestigd voor afhalen op naam van {safe}."
+                            if safe
+                            else "Top. Je bestelling is bevestigd voor afhalen."
+                        )
                     return
                 if self._is_negative(transcript):
                     st.pending_confirm = False
@@ -1517,14 +1955,9 @@ class SessionController:
                         else "Geen probleem. Wat wil je aanpassen?",
                     )
                     return
-                cart = st.order.summary(st.menu) if st.menu else ""
-                await self._speak(
-                    ws,
-                    f"Just to confirm, your order is: {cart}. Should I place it? Please say yes or no."
-                    if st.lang != "nl"
-                    else f"Even checken, je bestelling is: {cart}. Zal ik hem plaatsen? Zeg ja of nee.",
-                )
-                return
+                logger.info("RC3: exit pending_confirm latch on non-binary input: %r", transcript)
+                st.pending_confirm = False
+                # fall through to normal flow (do NOT prompt yes/no)
 
             if self._is_order_summary_query(transcript) and st.menu:
                 cart = st.order.summary(st.menu) or "Empty"
@@ -1607,7 +2040,7 @@ class SessionController:
                 await self.clear_thinking(ws)
                 if st.fulfillment_mode == "pickup":
                     if st.customer_name:
-                        await self._speak(ws, f"You're set for pickup under {st.customer_name}. {self._say_anything_else()}" if st.lang != "nl" else f"Je staat op afhalen op naam van {st.customer_name}. {self._say_anything_else()}")
+                        await self._speak(ws, f"You're set for pickup under {st.customer_name}." if st.lang != "nl" else f"Je staat op afhalen op naam van {st.customer_name}.")
                     else:
                         st.pending_name = True
                         await self._speak(ws, "Great. What name should I put the order under?" if st.lang != "nl" else "Prima. Op welke naam mag ik de bestelling zetten?")
@@ -1639,9 +2072,72 @@ class SessionController:
             items_before = dict(st.order.items)
 
             # Extract quantity once (support EN/NL), default 1
-            add_qty = (_extract_qty_first(transcript, "en") or _extract_qty_first(transcript, "nl") or 1)
+            raw_qty = (_extract_qty_first(transcript, "en") or _extract_qty_first(transcript, "nl"))
+            add_qty = (raw_qty or 1)
             effective_qty = add_qty
             now_ts = time.time()
+
+            # ----------------------------------------------------------
+            # RC3: "extra/another/one more" MUST increment the mentioned naan variant,
+            # not set an absolute qty and not touch generic Nan.
+            # Examples:
+            # - "add one extra garlic naan" -> +1 garlic naan
+            # - "another garlic naan" -> +1 garlic naan
+            # - "add 2 extra garlic naan" -> +2 garlic naan
+            # ----------------------------------------------------------
+            t_norm2 = " " + norm_simple(transcript or "") + " "
+            t_low2 = t_norm2.lower()
+
+            inc_cue = (
+                (" extra " in t_low2)
+                or (" another " in t_low2)
+                or (" one more " in t_low2)
+                or (" an extra " in t_low2)
+                or (" nog een " in t_low2)
+                or (" erbij " in t_low2)
+            )
+
+            if inc_cue and st.menu and re.search(r"\b(naan|nan)\b", t_low2):
+                variant2: Optional[str] = None
+                if re.search(r"\b(garlic|knoflook)\b", t_low2):
+                    variant2 = "garlic"
+                elif re.search(r"\b(plain|normal|regular|gewoon|simpel|standard)\b", t_low2):
+                    variant2 = "plain"
+                elif re.search(r"\b(cheese|kaas)\b", t_low2):
+                    variant2 = "cheese"
+                elif re.search(r"\b(peshawari)\b", t_low2):
+                    variant2 = "peshawari"
+                elif re.search(r"\b(keema)\b", t_low2):
+                    variant2 = "keema"
+
+                if variant2:
+                    iid2 = self._find_naan_item_for_variant(st.menu, variant2)
+                    if iid2:
+                        delta2 = int(raw_qty or 1)
+                        delta2 = max(1, delta2)
+
+                        logger.info(
+                            "RC3: naan_extra_increment cue=%r variant=%s delta=%s transcript=%r",
+                            True, variant2, delta2, transcript,
+                        )
+
+                        st.order.add(iid2, delta2)
+                        st.last_added = [(iid2, delta2)]
+                        st.pending_qty = 1
+                        st.pending_choice = None
+
+                        await self.clear_thinking(ws)
+
+                        cart = st.order.summary(st.menu) if st.menu else ""
+                        st.pending_cart_check = True
+                        st.cart_check_snapshot = cart
+                        await self._speak(
+                            ws,
+                            f"Okay, so that's {cart}. Is that correct?"
+                            if st.lang != "nl"
+                            else f"Oké, dus dat is: {cart}. Klopt dat?",
+                        )
+                        return
 
             # RC3.4: held-quantity for split utterances like "Yes, one ..." + next turn item
             if st.pending_qty_hold and now_ts < st.pending_qty_deadline:
@@ -1667,7 +2163,119 @@ class SessionController:
                 if not added_any:
                     adds = parse_add_item(st.menu, transcript, qty=effective_qty)
 
+                # RC3: suppress implicit re-adds when user merely repeats an item name
+                # (e.g., "Lamb Karahi" during spice/fulfillment/name phases).
+                # Only suppress if:
+                # - exactly one item hit
+                # - user did NOT express explicit add intent
+                # - user did NOT state an explicit quantity in the utterance
+                # - item is already present in the cart
+                if adds and len(adds) == 1 and (not has_explicit_add_intent) and (raw_qty is None):
+                    _iid, _q0 = adds[0]
+                    if isinstance(getattr(st.order, "items", None), dict) and (st.order.items.get(_iid, 0) or 0) > 0:
+                        logger.info("RC3: suppress implicit re-add on bare item mention: %s", _iid)
+                        adds = []
+
                 # Naan detection (generic + explicit mentions)
+                # --- RC3: handle split edits like "one plain naan and one garlic naan" deterministically ---
+                t_low = (transcript or "").lower()
+                if st.menu and ("naan" in t_low or "nan" in t_low or "naam" in t_low):
+                    has_plain_word = any(x in t_low for x in ["plain", "regular", "normal", "gewoon", "normaal", "standaard"])
+                    has_garlic = ("garlic" in t_low) or ("knoflook" in t_low)
+
+                    # If user says "one naan and one garlic naan", treat the first "naan" as plain/default naan.
+                    has_plain = has_plain_word or ((" one naan" in t_low or " 1 naan" in t_low or " one nan" in t_low or " 1 nan" in t_low) and has_garlic)
+
+                    # Only trigger on true split intent (both variants mentioned)
+                    if has_plain and has_garlic:
+                        plain_iid = self._find_naan_item_for_variant(st.menu, "plain")
+                        garlic_iid = self._find_naan_item_for_variant(st.menu, "garlic")
+
+                        if plain_iid and garlic_iid and plain_iid != garlic_iid:
+                            # RC3: parse per-variant quantities deterministically (EN/NL + digits)
+                            def _qty_from_tok(tok: str):
+                                t = (tok or '').strip().lower()
+                                if t.isdigit():
+                                    q = int(t)
+                                    return q if 1 <= q <= 20 else None
+                                m = {
+                                    # EN
+                                    'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+                                    # NL
+                                    'een': 1, 'één': 1, 'twee': 2, 'drie': 3, 'vier': 4, 'vijf': 5,
+                                }
+                                return m.get(t)
+
+                            tlow2 = t_low
+                            plain_qty = None
+                            garlic_qty = None
+
+                            # LAST match wins: this handles phrases like
+                            # 'instead of two plain naan, one plain naan and one garlic naan'
+                            g_all = re.findall(r"\b(\d+|one|two|three|four|five|een|één|twee|drie|vier|vijf)\b\s+(?:\w+\s+){0,2}?(garlic|knoflook)\s+(naan|nan)\b", tlow2)
+                            if g_all:
+                                garlic_qty = _qty_from_tok(g_all[-1][0])
+
+                            p_all = re.findall(r"\b(\d+|one|two|three|four|five|een|één|twee|drie|vier|vijf)\b\s+(?:\w+\s+){0,2}?(plain|regular|normal|gewoon|normaal|standaard)\s+(naan|nan)\b", tlow2)
+                            if p_all:
+                                plain_qty = _qty_from_tok(p_all[-1][0])
+
+                            # fallback: if user says 'one naan and one garlic naan', infer first qty as plain
+                            if plain_qty is None:
+                                mf = re.findall(r"\b(\d+|one|two|three|four|five|een|één|twee|drie|vier|vijf)\b", tlow2)
+                                if mf:
+                                    plain_qty = _qty_from_tok(mf[0])
+
+                            plain_qty = int(plain_qty or 1)
+                            garlic_qty = int(garlic_qty or 1)
+
+                            st.order.set_qty(plain_iid, plain_qty)
+                            st.order.set_qty(garlic_iid, garlic_qty)
+
+                            # Remove any other naan ids to avoid "2x Nan" leftovers
+                            for iid in list((st.order.items or {}).keys()):
+                                if self._is_nan_item(st.menu, iid) and iid not in (plain_iid, garlic_iid):
+                                    st.order.items.pop(iid, None)
+
+                            # Clear naan slot state and confirm cart
+                            st.pending_choice = None
+                            st.pending_qty = 1
+                            st.nan_prompt_count = 0
+                            await self.clear_thinking(ws)
+
+                            cart = st.order.summary(st.menu) if st.menu else ""
+                            st.pending_cart_check = True
+                            st.cart_check_snapshot = cart
+                            await self._speak(
+                                ws,
+                                f"Okay, so that's {cart}. Is that correct?"
+                                if st.lang != "nl"
+                                else f"Oké, dus dat is: {cart}. Klopt dat?",
+                            )
+                            return
+
+                # --- RC fix: handle naan quantity UPDATE without re-entering variant slot ---
+                t_low = (transcript or "").lower()
+                if st.menu and (" naan" in t_low or "nan" in t_low) and any(m in t_low for m in ("instead of", "make it", "change", "change to", "into", "in plaats van", "doe er", "maak er", "maak het")):
+                    from src.api.parser.quantity import extract_quantity_1_to_10
+                    new_qty = extract_quantity_1_to_10(transcript)
+                    if isinstance(new_qty, int) and new_qty >= 1:
+                        logger.info("RC3: naan_qty_update detected new_qty=%s transcript=%r", new_qty, transcript)
+                        naan_ids = [iid for iid in (st.order.items or {}).keys() if self._is_nan_item(st.menu, iid)]
+                        if len(naan_ids) == 1:
+                            iid = naan_ids[0]
+                            st.order.items[iid] = int(new_qty)
+                            st.pending_choice = None
+                            st.pending_qty = 1
+                            st.nan_prompt_count = 0
+                            await self.clear_thinking(ws)
+                            cart = st.order.summary(st.menu) if st.menu else ""
+                            st.pending_cart_check = True
+                            st.cart_check_snapshot = cart
+                            logger.info("RC3: naan_qty_update speaking cart_check cart=%r", cart)
+                            await self._speak(ws, f"Okay, so that\x27s {cart}. Is that correct?" if st.lang != "nl" else f"Oké, dus dat is: {cart}. Klopt dat?")
+                            return
+
                 mentions_nan, has_variant, variant = self._check_naan_request(st.menu, transcript)
 
                 # RC3.1: acoustic alias inside naan context ("lamb" -> "plain" if no lamb-naan exists)
@@ -1742,7 +2350,19 @@ class SessionController:
             cart_after = st.order.summary(st.menu) if st.menu else ""
             if added_any and st.menu and cart_after and cart_after != (cart_before or ""):
                 await self.clear_thinking(ws)
-                if not st.fulfillment_mode:
+
+                # RC3: do NOT auto-start checkout (pickup/delivery) after any add.
+                # Only start checkout if the user explicitly indicates they're done / want to place the order.
+                t_norm = " " + norm_simple(transcript) + " "
+                checkout_intent = any(k in t_norm for k in [
+                    " that's all ", " that s all ", " that s all ", " that is all ", " thats all ", " that's it ", " that s it ", " that s it ", " thats it ",
+                    " nothing else ", " no more ", " done ", " finish ", " finalize ",
+                    " checkout ", " check out ", " place the order ", " confirm ", " complete the order ",
+                    " dat is alles ", " dat was alles ", " niks meer ", " niets meer ", " klaar ",
+                    " afronden ", " rond af ", " afrekenen ", " bevestig ", " bestelling plaatsen ",
+                ])
+
+                if (not st.fulfillment_mode) and checkout_intent:
                     st.pending_fulfillment = True
                     await self._speak(ws, self._say_pickup_or_delivery())
                     return
@@ -1754,6 +2374,52 @@ class SessionController:
 
                 await self._speak(ws, self._say_anything_else())
                 return
+
+            # RC3: explicit "done/checkout" intent must bypass LLM and start fulfillment flow
+            # (Prevents LLM from inventing irrelevant steps like "spice level".)
+            if st.menu:
+                t_norm = " " + norm_simple(transcript) + " "
+                checkout_intent = any(k in t_norm for k in [
+                    " that's all ", " that s all ", " that s all ", " that is all ", " thats all ", " that's it ", " that s it ", " that s it ", " thats it ",
+                    " nothing else ", " no more ", " done ", " finish ", " finalize ",
+                    " checkout ", " check out ", " place the order ", " confirm ", " complete the order ",
+                    " dat is alles ", " dat was alles ", " niks meer ", " niets meer ", " klaar ",
+                    " afronden ", " rond af ", " afrekenen ", " bevestig ", " bestelling plaatsen ",
+                    " no that will be all ", " that will be all ", " dat will be all ",
+                ])
+
+                cart_now = st.order.summary(st.menu) if st.menu else ""
+                if checkout_intent and cart_now:
+                    await self.clear_thinking(ws)
+
+                    if not st.fulfillment_mode:
+                        st.pending_fulfillment = True
+                        await self._speak(ws, self._say_pickup_or_delivery())
+                        return
+
+                    if st.fulfillment_mode == "pickup" and not st.customer_name:
+                        st.pending_name = True
+                        await self._speak(ws, "Great. What name should I put the order under?")
+                        return
+
+                    # If we already have fulfillment + name (or delivery), recap briefly
+                    await self._speak(
+                        ws,
+                        f"Perfect. Your order is: {cart_now}. Anything else?"
+                        if st.lang != "nl"
+                        else f"Perfect. Je bestelling is: {cart_now}. Nog iets?"
+                    )
+                    return
+            # RC1-3: apply deterministic qty updates before LLM
+            if st.menu:
+                applied = self._maybe_orchestrator_apply_qty_update(st.menu, transcript)
+                if applied is not None:
+                    _iid, new_qty = applied
+                    await self.clear_thinking(ws)
+                    msg = f"Got it — quantity set to {new_qty}." if st.lang != "nl" else f"Goed — aantal aangepast naar {new_qty}."
+                    await self._speak(ws, msg)
+                    return
+
             # ==========================================================
             # 7) LLM fallback
             # ==========================================================
@@ -1764,6 +2430,22 @@ class SessionController:
 
             out = await llm_turn(self.oa, st, transcript, menu_context)
             reply = (out.get("reply") or "").strip()
+
+            # If the LLM turn mutated the cart, we must close the loop deterministically.
+            # This prevents "Let me update your order..." dead-ends where the client waits forever.
+            cart_after_llm = st.order.summary(st.menu) if st.menu else ""
+            if st.menu and cart_after_llm and cart_after_llm != (cart_before or ""):
+                # Avoid double-speaking the same cart-check snapshot if already active
+                if not (st.pending_cart_check and st.cart_check_snapshot == cart_after_llm):
+                    reply = (
+                        f"Done. Your order is now: {cart_after_llm}. {self._say_anything_else()}"
+                        if st.lang != "nl"
+                        else f"Goed. Je bestelling is nu: {cart_after_llm}. {self._say_anything_else()}"
+                    )
+                # If there was a pending cart check with an older snapshot, refresh it
+                # (keeps state coherent for yes/no)
+                st.pending_cart_check = False
+                st.cart_check_snapshot = ""
 
             if reply and not detect_explicit_remove_intent(transcript, st.lang):
                 if any(x in reply.lower() for x in ["remove", "cancel", "take off", "delete", "verwijder", "haal weg", "annuleer", "schrap"]):
