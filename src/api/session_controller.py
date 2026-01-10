@@ -175,6 +175,12 @@ class SessionState:
     pending_prefix: Optional[str] = None
     pending_prefix_deadline: float = 0.0
 
+    # RC1-4: semantic grace hold for incomplete openers like "I would like to add"
+    pending_semantic_hold: Optional[str] = None
+    pending_semantic_deadline: float = 0.0
+    pending_semantic_reason: Optional[str] = None
+    pending_semantic_clarify_used: bool = False
+
     # Offer/selection memory
     offered_item_id: Optional[str] = None
     offered_label: Optional[str] = None
@@ -2047,9 +2053,147 @@ class SessionController:
                 else:
                     await self._speak(ws, "You're set for delivery. Anything else you'd like to add?" if st.lang != "nl" else "Je staat op bezorgen. Wil je nog iets toevoegen?")
                 return
+            
+            # ==========================================================
+            # RC1-4: Semantic turn-finalization gate (ACTIONABLE vs HOLD vs CLARIFY)
+            # Placement: post-slots/checkout guards, pre-ordering logic & pre-LLM.
+            # During HOLD: no cart mutation, no LLM, no flow advance, no speak.
+            # ==========================================================
+            bypass_gate = (
+                bool(st.pending_choice)
+                or bool(st.pending_fulfillment)
+                or bool(st.pending_name)
+                or bool(getattr(st, "pending_cart_check", False))
+                or bool(getattr(st, "pending_confirm", False))
+                or bool(getattr(st, "order_finalized", False))
+                or bool(getattr(st, "order_complete", False))
+            )
 
+            gate_now = time.time()
 
-# ==========================================================
+            if bypass_gate:
+                # If a slot latch owns the turn, do not apply semantic grace here.
+                if st.pending_semantic_hold:
+                    logger.info(
+                        "RC1-4: semantic_gate bypass; clearing stale semantic_hold=%r",
+                        st.pending_semantic_hold,
+                    )
+                    st.pending_semantic_hold = None
+                    st.pending_semantic_deadline = 0.0
+                    st.pending_semantic_reason = None
+                    st.pending_semantic_clarify_used = False
+            else:
+                # 1) Resolve / clarify an existing semantic hold
+                if st.pending_semantic_hold:
+                    deadline = float(st.pending_semantic_deadline or 0.0)
+
+                    if gate_now <= deadline:
+                        pref = (st.pending_semantic_hold or "").strip()
+                        cont = (transcript or "").strip()
+                        merged = f"{pref} {cont}".strip() if cont else pref
+
+                        logger.info(
+                            "RC1-4: semantic_hold resolved prefix=%r continuation=%r merged=%r",
+                            pref,
+                            cont,
+                            merged,
+                        )
+
+                        transcript = merged
+                        st.pending_semantic_hold = None
+                        st.pending_semantic_deadline = 0.0
+                        st.pending_semantic_reason = None
+                        st.pending_semantic_clarify_used = False
+                    else:
+                        # Deadline elapsed: one short clarification, then stop nagging.
+                        if not st.pending_semantic_clarify_used:
+                            st.pending_semantic_clarify_used = True
+                            st.pending_semantic_hold = None
+                            st.pending_semantic_deadline = 0.0
+
+                            logger.info(
+                                "RC1-4: semantic_hold escalate_clarify reason=%s",
+                                st.pending_semantic_reason or "incomplete_opener",
+                            )
+
+                            await self.clear_thinking(ws)
+                            await self._speak(
+                                ws,
+                                "Sure — what would you like to add?"
+                                if st.lang != "nl"
+                                else "Prima — wat wil je toevoegen?",
+                            )
+                            return
+
+                        logger.info("RC1-4: semantic_hold expired after clarify; clearing and proceeding")
+                        st.pending_semantic_hold = None
+                        st.pending_semantic_deadline = 0.0
+                        st.pending_semantic_reason = None
+                        st.pending_semantic_clarify_used = False
+
+                # 2) Evaluate HOLD on current transcript (tight, exact-match on normalized text)
+                norm_gate = norm_simple(transcript or "").strip()
+
+                hold_triggers_en = {
+                    "i would like to add",
+                    "id like to add",
+                    "i want to add",
+                    "can i",
+                    "add",
+                    "one more",
+                    "another",
+                }
+
+                # Guardrail: never HOLD for common complete single-token answers / slot answers / qty tokens
+                never_hold = {
+                    "yes",
+                    "yeah",
+                    "yep",
+                    "ok",
+                    "okay",
+                    "sure",
+                    "ja",
+                    "nee",
+                    "no",
+                    "nope",
+                    "nah",
+                    "pickup",
+                    "pick up",
+                    "afhalen",
+                    "bezorgen",
+                    "delivery",
+                    "garlic",
+                    "knoflook",
+                    "plain",
+                    "normal",
+                    "regular",
+                    "gewoon",
+                    "simpel",
+                    "standard",
+                    "one",
+                    "two",
+                    "three",
+                    "1",
+                    "2",
+                    "3",
+                }
+
+                if norm_gate and (norm_gate not in never_hold) and (norm_gate in hold_triggers_en):
+                    st.pending_semantic_hold = (transcript or "").strip()
+                    st.pending_semantic_deadline = gate_now + 2.0
+                    st.pending_semantic_reason = "incomplete_opener:add"
+                    st.pending_semantic_clarify_used = False
+
+                    logger.info(
+                        "RC1-4: semantic_hold trigger reason=%s transcript=%r",
+                        st.pending_semantic_reason,
+                        transcript,
+                    )
+
+                    await self.clear_thinking(ws)
+                    return
+
+            # ==========================================================
             # 6) Ordering logic (Deterministic add + naan scoping + orchestrator hook)
             # FIX: initialize flags unconditionally (prevents NameError on non-add turns)
             # RC3.1: Avoid accidental adds when the user is clearly asking a question about an item.
