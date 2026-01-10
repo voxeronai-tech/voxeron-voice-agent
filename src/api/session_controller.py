@@ -1469,8 +1469,12 @@ class SessionController:
                 # Retry cap: never get stuck in confirmation loops if STT returns empty/unclear.
                 retries = int(getattr(st, "cart_check_retries", 0) or 0)
 
-                # Always show what STT heard during cart confirmation (helps debugging + UI transcript)
-                logger.info("STT: %s", transcript)
+                # Tenant-scoped transcript sanitization (guarded)
+                tm = getattr(self, "tenant_manager", None)
+                if tm and getattr(st, "tenant_cfg", None) is not None and hasattr(tm, "apply_aliases"):
+                    transcript, applied = tm.apply_aliases(st.tenant_cfg, transcript, st.lang)
+                    if applied:
+                        logger.info("alias_fix(cart_check) applied=%s", applied)
 
                 yn = self.oa.fast_yes_no(transcript) if hasattr(self.oa, "fast_yes_no") else None
                 # RC fix: allow "yes, ..." / "ja, ..." during cart_check and keep processing the remainder
@@ -1612,8 +1616,12 @@ class SessionController:
                 transcript = re.sub(r"\bdat zal alles zijn\b", "that'll be all", transcript, flags=re.IGNORECASE)
                 transcript = re.sub(r"\ben\b", "and", transcript, flags=re.IGNORECASE)
 
-            # RC3: acoustic alias for Dutch 'lam' -> 'lamb' to improve deterministic matching.
-            transcript = re.sub(r"\blam\b", "lamb", transcript, flags=re.IGNORECASE)
+            # RC1-4 Apply tenant-scoped transcript sanitization (aliases / acoustic fixes)
+            tm = getattr(self, "tenant_manager", None)
+            if tm and getattr(st, "tenant_cfg", None) is not None and hasattr(tm, "apply_aliases"):
+                transcript, applied = tm.apply_aliases(st.tenant_cfg, transcript, st.lang)
+                if applied:
+                    logger.info("alias_fix applied=%s", applied)
 
             logger.info("STT: %s", transcript)
             await self.send_user_text(ws, transcript)
@@ -1830,22 +1838,36 @@ class SessionController:
                     await self._speak(ws, "No problem. What name should I put the order under?")
                     return
                 name_clean = self._clean_customer_name(transcript)
+
+                # Accept Dutch/EN "my name is / mijn naam is / de naam is ..." patterns
+                name_clean = re.sub(
+                    r"^\s*(mijn naam is|de naam is|naam is|my name is|this is|it's|its)\s+",
+                    "",
+                    name_clean,
+                    flags=re.IGNORECASE | re.UNICODE,
+                ).strip(" .,!?:;")
+
                 if not self._looks_like_name_answer(name_clean):
                     msg = "Great. What name should I put the order under?" if st.lang != "nl" else "Prima. Op welke naam mag ik de bestelling zetten?"
                     await self.clear_thinking(ws)
                     await self._speak(ws, msg)
                     return
+
                 st.customer_name = name_clean
                 st.pending_name = False
 
+                # Immediately proceed to confirmation (use existing pending_confirm flow)
+                st.pending_confirm = True
+                cart = st.order.summary(st.menu) if st.menu else ""
+                mode_part = st.fulfillment_mode or "pickup"
                 safe = _address_name((st.customer_name or "").strip())
-                msg = (
-                    (f"Thank you, {safe}." if safe else "Thank you.")
-                    if st.lang != "nl"
-                    else (f"Dank je, {safe}." if safe else "Dank je.")
-                )
-                await self._speak(ws, msg)
+
+                if st.lang != "nl":
+                    await self._speak(ws, f"Thanks, {safe}. To confirm: {cart}, for {mode_part}. Is that correct?" if cart else f"Thanks, {safe}. Is that correct?")
+                else:
+                    await self._speak(ws, f"Dank je, {safe}. Ter bevestiging: {cart}, voor {mode_part}. Klopt dat?" if cart else f"Dank je, {safe}. Klopt dat?")
                 return
+
 
             # ==========================================================
             # 5b) Checkout / confirmation guards (RC3)
@@ -2397,6 +2419,26 @@ class SessionController:
                                 if st.lang != "nl"
                                 else f"Oké, dus dat is: {cart}. Klopt dat?",
                             )
+                            return
+                # RC1-4: avoid premature replies on split change requests, e.g.
+                # "Can we change one plain naan ... [pause] ... to one garlic naan"
+                t_low = (transcript or "").lower()
+                if st.menu and ("naan" in t_low or "nan" in t_low or "naam" in t_low):
+                    has_change_cue = any(m in t_low for m in ("change", "change one", "change 1", "make it", "instead of", "in plaats van", "doe er", "maak er", "maak het"))
+                    if has_change_cue:
+                        has_to_cue = any(x in t_low for x in (" to ", " into ", " naar ", " tot "))
+                        # If it's a change intent but user hasn't said what to change it TO yet, wait briefly.
+                        if not has_to_cue:
+                            st.pending_semantic_hold = (transcript or "").strip()
+                            st.pending_semantic_reason = "incomplete_change:naan"
+                            st.pending_semantic_deadline = time.time() + 2.0
+                            st.pending_semantic_clarify_used = False
+                            logger.info(
+                                "RC1-4: semantic_hold trigger reason=%s transcript=%r",
+                                st.pending_semantic_reason,
+                                transcript,
+                            )
+                            await self.clear_thinking(ws)
                             return
 
                 # --- RC fix: handle naan quantity UPDATE without re-entering variant slot ---

@@ -31,7 +31,7 @@ class TenantConfig:
     phonetics: Dict[str, Any]
     rules: Dict[str, Any]
     intents: Dict[str, Any]  # hydrated from intents.yaml
-
+    aliases: Dict[str, Any]  # hydrated from aliases.json (optional)
 
 # -------------------------
 # Helpers
@@ -207,6 +207,15 @@ class TenantManager:
         phonetics = _read_json(phonetics_json)
         rules = _read_json(rules_json)
 
+        aliases_json = tdir / "aliases.json"
+        aliases: Dict[str, Any] = {}
+        if aliases_json.exists():
+            try:
+                aliases = _read_json(aliases_json)
+            except Exception as e:
+                logger.warning("aliases.json load failed for %s: %s", tenant_id, e)
+                aliases = {}
+
         tts = tenant.get("tts") or {}
         stt = tenant.get("stt") or {}
 
@@ -230,6 +239,7 @@ class TenantManager:
             phonetics=phonetics,
             rules=rules,
             intents=intents,
+            aliases=aliases,
         )
 
         self._cache[tenant_id] = cfg
@@ -251,6 +261,137 @@ class TenantManager:
         for k in list(self._compiled_cache.keys()):
             if k[0] == tenant_id:
                 self._compiled_cache.pop(k, None)
+
+    # -------------------------
+    # Transcript aliases (tenant-scoped sanitization)
+    # -------------------------
+    def _aliases_for_lang(self, cfg: Optional[TenantConfig], lang: str) -> Dict[str, Any]:
+        if not cfg:
+            return {}
+        a = cfg.aliases or {}
+        if not isinstance(a, dict):
+            return {}
+
+        by_lang = a.get("by_lang")
+        if isinstance(by_lang, dict):
+            lang_key = (lang or "").lower().strip()
+            merged: Dict[str, Any] = {}
+            for k in ("exact", "regex"):
+                if k in a:
+                    merged[k] = a.get(k)
+            lang_obj = by_lang.get(lang_key)
+            if isinstance(lang_obj, dict):
+                for k in ("exact", "regex"):
+                    if k in lang_obj:
+                        merged[k] = lang_obj.get(k)
+            return merged
+
+        return a
+    def _compile_aliases(self, cfg: Optional[TenantConfig], lang: str) -> List[Tuple[re.Pattern, str]]:
+        """
+        Compile alias replacements into regex patterns.
+        Cached per (tenant_id, lang).
+        """
+        if not cfg:
+            return []
+
+        cache_key = (cfg.tenant_id, f"alias:{lang}")
+        if cache_key in self._compiled_cache:
+            return self._compiled_cache[cache_key]
+
+        aliases = self._aliases_for_lang(cfg, lang)
+        compiled: List[Tuple[re.Pattern, str]] = []
+
+        for src, dst in aliases.items():
+            if not src or not dst:
+                continue
+            # word-boundary safe, normalized matching
+            pat = re.compile(r"\b" + re.escape(src) + r"\b", re.IGNORECASE)
+            compiled.append((pat, dst))
+
+        self._compiled_cache[cache_key] = compiled
+        return compiled
+
+    def apply_aliases(self, cfg: Optional[TenantConfig], text: str, lang: str) -> str:
+        """
+        Apply tenant-scoped transcript aliases before intent parsing.
+        """
+        if not text or not cfg:
+            return text
+
+        out = text
+        for pat, repl in self._compile_aliases(cfg, lang):
+            if pat.search(out):
+                logger.info("[ALIAS] %r -> %r", pat.pattern, repl)
+                out = pat.sub(repl, out)
+
+        return out
+
+    def _compile_alias_rules(self, tenant_id: str, lang: str, aliases: Dict[str, Any]) -> List[Tuple[re.Pattern, str]]:
+        cache_key = (tenant_id, f"aliases:{(lang or '*').lower()}")
+        cached = self._compiled_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        rules: List[Tuple[re.Pattern, str]] = []
+
+        exact = aliases.get("exact")
+        if isinstance(exact, dict):
+            for src, dst in exact.items():
+                if not isinstance(src, str) or not isinstance(dst, str):
+                    continue
+                src_n = norm_simple(src)
+                dst_n = norm_simple(dst)
+                if not src_n:
+                    continue
+                pat = re.compile(rf"(?<!\w){re.escape(src_n)}(?!\w)", flags=re.UNICODE)
+                rules.append((pat, dst_n))
+
+        rx = aliases.get("regex")
+        if isinstance(rx, list):
+            for item in rx:
+                if not isinstance(item, dict):
+                    continue
+                pat_s = item.get("pattern")
+                repl = item.get("repl")
+                flags = _flags_from_list(item.get("flags")) | re.UNICODE
+                if isinstance(pat_s, str) and isinstance(repl, str) and pat_s.strip():
+                    try:
+                        rules.append((re.compile(pat_s, flags=flags), repl))
+                    except Exception:
+                        continue
+
+        self._compiled_cache[cache_key] = rules
+        return rules
+
+    def apply_aliases(self, cfg: Optional[TenantConfig], text: str, lang: str) -> Tuple[str, List[Tuple[str, str]]]:
+        """
+        Deterministic transcript sanitization using tenant-scoped aliases.json.
+        Returns (sanitized_text, applied_pairs).
+        """
+        raw = text or ""
+        norm = norm_simple(raw)
+
+        if not cfg or not norm:
+            return raw, []
+
+        aliases = self._aliases_for_lang(cfg, lang)
+        if not aliases:
+            return raw, []
+
+        rules = self._compile_alias_rules(cfg.tenant_id, lang, aliases)
+        if not rules:
+            return raw, []
+
+        out = norm
+        applied: List[Tuple[str, str]] = []
+        for pat, repl in rules:
+            new = pat.sub(repl, out)
+            if new != out:
+                applied.append((pat.pattern, repl))
+                out = new
+
+        return out, applied
 
     # -------------------------
     # Normalization / phonetics

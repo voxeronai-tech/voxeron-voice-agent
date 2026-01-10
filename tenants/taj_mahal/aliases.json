@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "exact": {
+    "tuba to chicken": "two butter chicken",
+    "tuba two chicken": "two butter chicken",
+    "tuba butter chicken": "two butter chicken",
+    "i said tuba to chicken": "two butter chicken",
+    "no i said tuba to chicken": "two butter chicken",
+    "klein naan": "plain naan",
+    "klijn naan": "plain naan",
+    "nan": "naan"
+  },
+  "by_lang": {
+    "en": {
+      "regex": [
+        { "pattern": "\\bdat zal( alles)? zijn\\b", "repl": "that'll be all", "flags": ["I"] },
+        { "pattern": "\\bdat zal het zijn\\b", "repl": "that'll be all", "flags": ["I"] },
+        { "pattern": "\\bdat zal alles zijn\\b", "repl": "that'll be all", "flags": ["I"] },
+        { "pattern": "\\ben\\b", "repl": "and", "flags": ["I"] },
+        { "pattern": "\\blam\\b", "repl": "lamb", "flags": ["I"] }
+      ]
+    }
+  }
+}
