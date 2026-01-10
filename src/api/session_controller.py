@@ -2442,8 +2442,37 @@ class SessionController:
                         added_any = True
                         added_ids.append(item_id)
 
+                    # Prefer a naan-scoped quantity ("two naan") over global qty ("one butter chicken")
+                    t_low_latch = (transcript or "").lower()
+
+                    def _naan_qty_from_text(t: str):
+                        m = re.findall(
+                            r"\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|"
+                            r"een|één|twee|drie|vier|vijf|zes|zeven|acht|negen|tien)\b"
+                            r"(?:\s+\w+){0,2}?\s+\b(naan|nan|naam)\b",
+                            t,
+                            flags=re.UNICODE,
+                        )
+                        if m:
+                            tok = m[-1][0].lower()
+                            if tok.isdigit():
+                                return int(tok)
+                            return {
+                                "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                                "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+                                "een": 1, "één": 1, "twee": 2, "drie": 3, "vier": 4, "vijf": 5,
+                                "zes": 6, "zeven": 7, "acht": 8, "negen": 9, "tien": 10,
+                            }.get(tok)
+
+                        m2 = re.search(r"\b(naan|nan|naam)\b\s*(?:x\s*)?(\d{1,2})\s*(?:x)?\b", t)
+                        if m2:
+                            return int(m2.group(2))
+
+                        return None
+
+                    naan_qty = _naan_qty_from_text(t_low_latch)
+                    st.pending_qty = max(1, int(naan_qty or 1))
                     st.pending_choice = "nan_variant"
-                    st.pending_qty = max(1, int(effective_qty or 1))
                     st.nan_prompt_count = 0
                     await self.clear_thinking(ws)
                     await self._speak(ws, self._naan_optima_prompt(list_mode="short"))
