@@ -1314,7 +1314,8 @@ class SessionController:
         if variant:
             item_id = self._find_naan_item_for_variant(st.menu, variant)
             if item_id:
-                st.order.add(item_id, max(1, int(st.pending_qty or 1)))
+                apply_qty = max(1, int(getattr(st, "pending_qty", 1) or 1))
+                st.order.set_qty(item_id, apply_qty)
                 st.pending_choice = None
                 st.pending_qty = 1
                 st.nan_prompt_count = 0
@@ -2073,7 +2074,7 @@ class SessionController:
 
             if bypass_gate:
                 # If a slot latch owns the turn, do not apply semantic grace here.
-                if st.pending_semantic_hold:
+                if getattr(st, "pending_semantic_hold", None):
                     logger.info(
                         "RC1-4: semantic_gate bypass; clearing stale semantic_hold=%r",
                         st.pending_semantic_hold,
@@ -2084,11 +2085,11 @@ class SessionController:
                     st.pending_semantic_clarify_used = False
             else:
                 # 1) Resolve / clarify an existing semantic hold
-                if st.pending_semantic_hold:
+                if getattr(st, "pending_semantic_hold", None):
                     deadline = float(st.pending_semantic_deadline or 0.0)
 
                     if gate_now <= deadline:
-                        pref = (st.pending_semantic_hold or "").strip()
+                        pref = (getattr(st, "pending_semantic_hold", None) or "").strip()
                         cont = (transcript or "").strip()
                         merged = f"{pref} {cont}".strip() if cont else pref
 
