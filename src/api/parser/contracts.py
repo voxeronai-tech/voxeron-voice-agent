@@ -102,16 +102,3 @@ class ParserResult:
     entities: Dict[str, Any] = field(default_factory=dict)
     delta: Dict[str, Any] = field(default_factory=dict)
     next_action: Optional[str] = None
-A
-A
-A
-A
-A
-A
-A
-A
-A
-A
-A
-A
-
