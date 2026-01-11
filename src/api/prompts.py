@@ -5,6 +5,10 @@ Voxeron Prompt Architecture
 This module contains ONLY prompt text and prompt composition logic.
 - SessionController owns state & orchestration
 - TenantConfig provides optional tenant-specific prompt fuel
+
+Important:
+- We avoid Python str.format() over large prompt templates because JSON examples use braces.
+  We only perform a safe placeholder replacement for {lang}.
 """
 
 from typing import Optional
@@ -68,10 +72,14 @@ def build_system_prompt(
 ) -> str:
     """
     Compose the final system prompt.
-    This is the ONLY place where string formatting happens.
+
+    Notes:
+    - We only replace the {lang} placeholder to avoid brace-escaping issues with JSON examples.
+    - Everything else is appended deterministically.
     """
 
-    sys = GLOBAL_SYSTEM_BASE.format(lang=lang)
+    # Safe placeholder substitution (do NOT use str.format here)
+    sys = (GLOBAL_SYSTEM_BASE or "").replace("{lang}", str(lang))
 
     sys += f"\n\nlang={lang}"
     sys += f"\nCURRENT_CART: [{current_cart or 'Empty'}]"
