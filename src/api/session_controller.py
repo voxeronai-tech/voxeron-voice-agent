@@ -593,6 +593,14 @@ class SessionController:
 
     def _say_pickup_or_delivery(self) -> str:
         return "Is this for pickup or delivery?" if self.state.lang != "nl" else "Is dit om af te halen of om te bezorgen?"
+    
+    async def _reprompt_pending_confirm_yes_no(self, ws: WebSocket) -> None:
+        """Reprompt during pending_confirm when input is not clearly yes/no."""
+        st = self.state
+        if st.lang != "nl":
+            await self._speak(ws, "Sorry, I need a yes or no. Should I place the order?")
+        else:
+            await self._speak(ws, "Sorry, ik heb een ja of nee nodig. Zal ik de bestelling plaatsen?")
 
     # -------------------------
     # Deterministic guards
@@ -1892,10 +1900,7 @@ class SessionController:
                 logger.info("RC1-4: pending_confirm unclear input, reprompt: %r", transcript)
                 st.pending_confirm = True  # keep latch
 
-                if st.lang != "nl":
-                    await self._speak(ws, "Sorry, I need a yes or no. Should I place the order?")
-                else:
-                    await self._speak(ws, "Sorry, ik heb een ja of nee nodig. Zal ik de bestelling plaatsen?")
+                await self._reprompt_pending_confirm_yes_no(ws)
                 return
 
             # Total amount / price query: we don't have pricing, but we can summarize and offer to confirm.
@@ -1985,10 +1990,7 @@ class SessionController:
                 logger.info("RC1-4: pending_confirm unclear input, reprompt: %r", transcript)
                 st.pending_confirm = True  # keep latch
 
-                if st.lang != "nl":
-                    await self._speak(ws, "Sorry, I need a yes or no. Should I place the order?")
-                else:
-                    await self._speak(ws, "Sorry, ik heb een ja of nee nodig. Zal ik de bestelling plaatsen?")
+                await self._reprompt_pending_confirm_yes_no(ws)
                 return
 
             if self._is_order_summary_query(transcript) and st.menu:
