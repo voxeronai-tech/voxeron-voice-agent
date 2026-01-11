@@ -19,6 +19,14 @@
         { "pattern": "\\ben\\b", "repl": "and", "flags": ["I"] },
         { "pattern": "\\blam\\b", "repl": "lamb", "flags": ["I"] }
       ]
+    },
+    "nl": {
+      "regex": [
+        { "pattern": "\\b(dat zal wel)\\b", "repl": "that will be all", "flags": ["I"] },
+        { "pattern": "\\b(nou dat zal wel)\\b", "repl": "that will be all", "flags": ["I"] },
+        { "pattern": "\\b(dat is alles)\\b", "repl": "that will be all", "flags": ["I"] },
+        { "pattern": "\\b(dat was alles)\\b", "repl": "that will be all", "flags": ["I"] }
+      ]
     }
   }
 }
