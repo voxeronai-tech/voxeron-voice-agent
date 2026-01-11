@@ -35,7 +35,7 @@ except Exception:  # pragma: no cover
     CognitiveOrchestrator = None  # type: ignore
     OrchestratorRoute = None  # type: ignore
     MatchKind = None  # type: ignore
-
+from src.api.telemetry.emitter import TelemetryEmitter, TelemetryContext
 
 logger = logging.getLogger("taj-agent")
 
@@ -993,8 +993,26 @@ class SessionController:
         if self.state.tenant_ref == "taj_mahal":
             alias_map.update(self._taj_overlay_alias_map(menu))
 
-        orch = CognitiveOrchestrator(alias_map=alias_map)
-        decision = orch.decide(transcript)
+        # --- S1-4 telemetry wiring (best-effort, no controller DB logic) ---
+        if not hasattr(self, "_telemetry"):
+            self._telemetry = TelemetryEmitter()
+
+        st = self.state
+        sid = (
+            getattr(st, "session_id", None)
+            or getattr(st, "session_uuid", None)
+            or getattr(st, "ws_id", None)
+            or "unknown"
+        )
+
+        ctx = TelemetryContext(
+            session_id=str(sid),
+            tenant_id=str(getattr(st, "tenant_ref", "unknown")),
+            domain=str(getattr(st, "tenant_ref", "unknown")),
+        )
+
+        orch = CognitiveOrchestrator(alias_map=alias_map, telemetry=self._telemetry)
+        decision = orch.decide(transcript, telemetry_ctx=ctx)
 
         if decision.route != OrchestratorRoute.DETERMINISTIC:
             return None
@@ -1030,8 +1048,27 @@ class SessionController:
         if self.state.tenant_ref == "taj_mahal":
             alias_map.update(self._taj_overlay_alias_map(menu))
 
-        orch = CognitiveOrchestrator(alias_map=alias_map)
-        decision = orch.decide(transcript)
+        # --- S1-4 telemetry wiring (best-effort, no controller DB logic) ---
+        if not hasattr(self, "_telemetry"):
+            self._telemetry = TelemetryEmitter()
+
+        st = self.state
+        sid = (
+            getattr(st, "session_id", None)
+            or getattr(st, "session_uuid", None)
+            or getattr(st, "ws_id", None)
+            or "unknown"
+        )
+
+        ctx = TelemetryContext(
+            session_id=str(sid),
+            tenant_id=str(getattr(st, "tenant_ref", "unknown")),
+            domain=str(getattr(st, "tenant_ref", "unknown")),
+        )
+
+        orch = CognitiveOrchestrator(alias_map=alias_map, telemetry=self._telemetry)
+        decision = orch.decide(transcript, telemetry_ctx=ctx)
+
         if decision.route != OrchestratorRoute.DETERMINISTIC:
             return None
 
