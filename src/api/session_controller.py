@@ -623,7 +623,7 @@ class SessionController:
 
     def _is_affirm(self, text: str) -> bool:
         t = " " + norm_simple(text) + " "
-        keys = [" yes ", " yeah ", " yep ", " ok ", " okay ", " oke ", " oké ", " sure ", " correct ", " klopt ", " ja ", " prima ", " graag ", " indeed "]
+        keys = [" yes ", " yeah ", " yep ", " ok ", " okay ", " oke ", " oké ", " sure ", " correct ", " klopt ", " juist ", " helemaal goed ", " ja ", " prima ", " graag ", " indeed "]
         return any(k in t for k in keys)
 
     def _is_negative(self, text: str) -> bool:
@@ -666,7 +666,9 @@ class SessionController:
         t = " " + norm_simple(text) + " "
         yes = [
             " yes ", " yeah ", " yep ", " yup ", " ok ", " okay ", " sure ", " please ", " sounds good ",
-            " ja ", " jazeker ", " zeker ", " oké ", " oke ", " prima ", " graag ", "top","toppie", "okidoki"
+            " ja ", " jazeker ", " zeker ", " oké ", " oke ", " prima ", " graag ", " top ", " toppie ", " okidoki ",
+            # NL/EN confirmation phrases (important for pending_confirm latch)
+            " correct ", " klopt ", " juist ", " helemaal goed ", " dat klopt ", " dat is correct ",
         ]
         return any(y in t for y in yes)
 
@@ -1876,9 +1878,14 @@ class SessionController:
                     await self._speak(ws, "No problem. What would you like to change?" if st.lang != "nl" else "Prima. Wat wil je wijzigen?")
                     return
 
-                logger.info("RC3: exit pending_confirm latch on non-binary input: %r", transcript)
-                st.pending_confirm = False
-                # fall through to normal flow (do NOT reprompt)
+                logger.info("RC1-4: pending_confirm unclear input, reprompt: %r", transcript)
+                st.pending_confirm = True  # keep latch
+
+                if st.lang != "nl":
+                    await self._speak(ws, "Sorry, I need a yes or no. Should I place the order?")
+                else:
+                    await self._speak(ws, "Sorry, ik heb een ja of nee nodig. Zal ik de bestelling plaatsen?")
+                return
 
             # Total amount / price query: we don't have pricing, but we can summarize and offer to confirm.
             if self._is_total_amount_query(transcript) and st.menu:
@@ -1964,9 +1971,14 @@ class SessionController:
                         else "Geen probleem. Wat wil je aanpassen?",
                     )
                     return
-                logger.info("RC3: exit pending_confirm latch on non-binary input: %r", transcript)
-                st.pending_confirm = False
-                # fall through to normal flow (do NOT prompt yes/no)
+                logger.info("RC1-4: pending_confirm unclear input, reprompt: %r", transcript)
+                st.pending_confirm = True  # keep latch
+
+                if st.lang != "nl":
+                    await self._speak(ws, "Sorry, I need a yes or no. Should I place the order?")
+                else:
+                    await self._speak(ws, "Sorry, ik heb een ja of nee nodig. Zal ik de bestelling plaatsen?")
+                return
 
             if self._is_order_summary_query(transcript) and st.menu:
                 cart = st.order.summary(st.menu) or "Empty"
