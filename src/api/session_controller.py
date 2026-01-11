@@ -1845,11 +1845,22 @@ class SessionController:
                 safe = _address_name((st.customer_name or "").strip())
 
                 if st.lang != "nl":
-                    await self._speak(ws, f"Thanks, {safe}. To confirm: {cart}, for {mode_part}. Is that correct?" if cart else f"Thanks, {safe}. Is that correct?")
+                    thanks = f"Thanks, {safe}." if safe else "Thanks."
+                    await self._speak(
+                        ws,
+                        f"{thanks} To confirm: {cart}, for {mode_part}. Is that correct?"
+                        if cart
+                        else f"{thanks} Is that correct?",
+                    )
                 else:
-                    await self._speak(ws, f"Dank je, {safe}. Ter bevestiging: {cart}, voor {mode_part}. Klopt dat?" if cart else f"Dank je, {safe}. Klopt dat?")
+                    thanks = f"Dank je, {safe}." if safe else "Dank je."
+                    await self._speak(
+                        ws,
+                        f"{thanks} Ter bevestiging: {cart}, voor {mode_part}. Klopt dat?"
+                        if cart
+                        else f"{thanks} Klopt dat?",
+                    )
                 return
-
 
             # ==========================================================
             # 5b) Checkout / confirmation guards (RC3)
