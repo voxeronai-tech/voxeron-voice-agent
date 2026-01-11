@@ -25,6 +25,7 @@ from .policy import (
     system_guard_for_llm,
 )
 from .services.openai_client import OpenAIClient
+from .prompts import build_system_prompt
 
 # Optional (RC3): Cognitive Orchestrator (safe import)
 try:
@@ -417,29 +418,7 @@ def parse_add_item(menu: MenuSnapshot, text: str, *, qty: int) -> List[Tuple[str
 
     return out
 
-
-LLM_SYSTEM_BASE = """
-You are a helpful restaurant ordering agent for the current tenant.
-
-Rules:
-- Always respond in the user's current language (lang), even if the user uses words from another language.
-- Do NOT switch languages unless the user explicitly asks (e.g., says 'Nederlands' or 'English').
-- You must not invent menu items. Use MENU_CONTEXT only.
-- You must remember the CURRENT_CART and never claim it's empty if it's not.
-- You must NEVER suggest removing items unless the user explicitly asked to remove/cancel/delete.
-- Keep replies concise and natural.
-
-Output format:
-Return JSON only:
-{
-  "reply": "text to say to user",
-  "add": [{"item_name": "string", "qty": 1}],
-  "remove": [{"item_name": "string", "qty": 1}]
-}
-If you don't want to add/remove anything, use empty arrays.
-""".strip()
-
-
+# ==========================================================
 def _policy_guard_append(state: SessionState, system_text: str) -> str:
     try:
         ps = SessionPolicyState(lang=getattr(state, "lang", "en"))
@@ -467,11 +446,12 @@ def build_llm_messages(state: SessionState, user_text: str, menu_context: str) -
     cart = state.order.summary(state.menu) if state.menu else ""
     cart_str = cart if cart else "Empty"
 
-    sys = (
-        LLM_SYSTEM_BASE
-        + f"\n\nlang={state.lang}"
-        + f"\nCURRENT_CART: [{cart_str}]"
-        + f"\nMENU_CONTEXT:\n{menu_context}"
+    sys = build_system_prompt(
+        lang=state.lang,
+        current_cart=cart_str,
+        menu_context=menu_context,
+        tenant_prompt=None,   # Step 3 will load this from tenant config
+        policy_guard=None,    # appended below via _policy_guard_append
     )
 
     # RC3: enforce output language when language is locked (prevents NL drift on "ja/maak het")
