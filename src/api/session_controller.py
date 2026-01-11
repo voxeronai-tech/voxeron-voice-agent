@@ -25,6 +25,7 @@ from .policy import (
     post_cart_followup,
 )
 from .services.openai_client import OpenAIClient
+from .telemetry.emitter import TelemetryEmitter, TelemetryContext
 
 logger = logging.getLogger("taj-agent")
 
