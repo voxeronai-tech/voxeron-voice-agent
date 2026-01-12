@@ -53,6 +53,11 @@ class MenuSnapshot:
     name_choices: List[Tuple[str, str]] = field(default_factory=list)  # (norm_name, item_id)
     alias_map: Dict[str, str] = field(default_factory=dict)           # norm_alias -> item_id
 
+    # RC1-4 foundation: ambiguity metadata ("Category Heads")
+    # head -> [item_id...], head -> ["chicken","lamb",...]
+    ambiguity_groups: Dict[str, List[str]] = field(default_factory=dict)
+    ambiguity_options: Dict[str, List[str]] = field(default_factory=dict)
+
     def display_name(self, item_id: str) -> str:
         it = self.items_by_id.get(item_id)
         return it.name if it else item_id
@@ -228,6 +233,38 @@ class MenuStore:
                             continue
                         name_norm = norm_text(snap.items_by_id[iid].name)
                         _set_alias(alias, iid, name_norm)
+
+                    # RC1-4: build ambiguity metadata (Category Heads)
+                    groups: Dict[str, List[str]] = {}
+                    options: Dict[str, List[str]] = {}
+
+                    for iid, it in snap.items_by_id.items():
+                        n = norm_text(it.name)
+                        toks = n.split()
+                        if len(toks) < 2:
+                            continue
+                        head = toks[-1]
+                        if len(head) < 4:
+                            continue
+                        groups.setdefault(head, []).append(iid)
+
+                    groups = {h: ids for h, ids in groups.items() if len(ids) >= 2}
+
+                    for h, ids in groups.items():
+                        seen: List[str] = []
+                        for iid in ids:
+                            n = norm_text(snap.items_by_id[iid].name)
+                            toks = n.split()
+                            if len(toks) < 2 or toks[-1] != h:
+                                continue
+                            opt = toks[-2]
+                            if opt and opt not in seen:
+                                seen.append(opt)
+                        if len(seen) >= 2:
+                            options[h] = seen
+
+                    snap.ambiguity_groups = groups
+                    snap.ambiguity_options = options
 
                 break  # success
             except (
