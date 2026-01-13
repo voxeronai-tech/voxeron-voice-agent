@@ -11,6 +11,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import WebSocket
+from .models.state import DisambiguationContext
 
 from .intent import (
     detect_language_intent,
@@ -744,6 +745,61 @@ class SessionController:
                     return " ".join(words[len(p_words):]).strip(" .,")
         return t.strip(" .,")
 
+    def _maybe_trigger_menu_disambiguation(self, transcript: str, *, default_qty: int = 1) -> Optional[dict]:
+        st = self.state
+        if not st.menu:
+            return None
+
+        amb = getattr(st.menu, "ambiguity_options", None) or {}
+        if not isinstance(amb, dict) or not amb:
+            return None
+
+        # Split into segments so "butter chicken and two biryani" doesn't match biryani option "chicken"
+        parts = re.split(r"\b(?:and|en)\b", transcript or "", flags=re.IGNORECASE)
+        parts = [p.strip(" ,.!?") for p in parts if (p or "").strip()]
+
+        for head, opts in amb.items():
+            h = norm_simple(str(head))
+            if not h:
+                continue
+
+            opt_list = [norm_simple(str(o)) for o in (opts or [])]
+            opt_list = [o for o in opt_list if o]
+            if len(opt_list) < 2:
+                continue  # not ambiguous
+
+            # Only consider segments that contain the head token
+            head_segments = []
+            for p in parts:
+                pn = " " + norm_simple(p) + " "
+                if f" {h} " in pn:
+                    head_segments.append((p, pn))
+
+            if not head_segments:
+                continue
+
+            for seg_raw, seg_norm in head_segments:
+                # If this segment already contains an option, leaf is specified → no disambiguation
+                if any(f" {o} " in seg_norm for o in opt_list):
+                    continue
+
+                # qty extracted from the segment containing the head
+                try:
+                    from src.api.parser.quantity import extract_quantity_1_to_10
+                    q = extract_quantity_1_to_10(seg_raw) or default_qty
+                except Exception:
+                    q = default_qty
+
+                return {
+                    "parent_label": h,
+                    "options": opt_list,
+                    "qty": int(q or 1),
+                    "original_intent": "ADD_ITEM",
+                }
+
+        return None
+
+
     def _looks_like_name_answer(self, text: str) -> bool:
         t_raw = (text or "").strip()
         tn = norm_simple(t_raw)
@@ -974,7 +1030,7 @@ class SessionController:
                 out[alias] = iid
         return out
 
-    def _maybe_orchestrator_match_item(self, menu: MenuSnapshot, transcript: str, qty: int) -> Optional[str]:
+    async def _maybe_orchestrator_match_item(self, ws: WebSocket, menu: MenuSnapshot, transcript: str, qty: int) -> Optional[str]:
         """
         Optional RC3: deterministic parser BEFORE any LLM.
         This is intentionally conservative: only for short utterances.
@@ -1011,7 +1067,7 @@ class SessionController:
             domain=str(getattr(st, "tenant_ref", "unknown")),
         )
 
-        orch = CognitiveOrchestrator(alias_map=alias_map, telemetry=self._telemetry)
+        orch = CognitiveOrchestrator(alias_map=alias_map, menu=menu, telemetry=self._telemetry)
         decision = orch.decide(transcript, telemetry_ctx=ctx)
 
         if decision.route != OrchestratorRoute.DETERMINISTIC:
@@ -1066,7 +1122,7 @@ class SessionController:
             domain=str(getattr(st, "tenant_ref", "unknown")),
         )
 
-        orch = CognitiveOrchestrator(alias_map=alias_map, telemetry=self._telemetry)
+        orch = CognitiveOrchestrator(alias_map=alias_map, menu=menu, telemetry=self._telemetry)
         decision = orch.decide(transcript, telemetry_ctx=ctx)
 
         if decision.route != OrchestratorRoute.DETERMINISTIC:
@@ -1350,6 +1406,84 @@ class SessionController:
         # Sticky latch: if we couldn't resolve, re-prompt (but do not advance the phase)
         st.nan_prompt_count += 1
         await self._speak(ws, self._naan_optima_prompt(list_mode="short"))
+        return True
+
+    async def _handle_pending_disambiguation(self, ws: WebSocket, transcript: str) -> bool:
+        """
+        Generic disambiguation latch consumer.
+        Uses st.pending_disambiguation (DisambiguationContext).
+        Expects a reply like "chicken" / "lamb" / "vegetarian" etc.
+        """
+        st = self.state
+        ctx = getattr(st, "pending_disambiguation", None)
+        if not ctx:
+            return False
+
+        raw = (transcript or "").strip()
+        t = " " + norm_simple(raw) + " "
+
+        chosen: Optional[str] = None
+        for opt in (ctx.options or []):
+            o = norm_simple(opt)
+            if not o:
+                continue
+            if f" {o} " in t:
+                chosen = o
+                break
+
+        if not chosen:
+            await self.clear_thinking(ws)
+            opts = ", ".join(ctx.options or [])
+            await self._speak(
+                ws,
+                f"We have {opts}. Which {ctx.parent_label} would you like?"
+                if st.lang != "nl"
+                else f"We hebben {opts}. Welke {ctx.parent_label} wil je?",
+            )
+            return True
+
+        if not st.menu:
+            st.pending_disambiguation = None
+            return False
+
+        phrase = f"{chosen} {ctx.parent_label}".strip()
+        adds: List[Tuple[str, int]] = []
+        try:
+            adds = parse_add_item(st.menu, phrase, qty=max(1, int(ctx.qty or 1)))
+        except Exception:
+            adds = []
+
+        if not adds:
+            await self.clear_thinking(ws)
+            await self._speak(
+                ws,
+                f"Sorry — I couldn't match that on the menu. Please say {phrase}."
+                if st.lang != "nl"
+                else f"Sorry — ik kan dat niet vinden. Zeg bijvoorbeeld {phrase}.",
+            )
+            return True
+
+        item_id, q = adds[0]
+        qi = max(1, int(q or 1))
+        st.order.add(item_id, qi)
+        st.last_added = [(item_id, qi)]
+        st.last_added_ts = time.time()
+
+        st.pending_disambiguation = None
+
+        await self.clear_thinking(ws)
+
+        cart = st.order.summary(st.menu) if st.menu else ""
+        st.pending_cart_check = True
+        st.cart_check_snapshot = cart
+        st.cart_check_retries = 0
+
+        await self._speak(
+            ws,
+            f"Okay, so that's {cart}. Is that correct?"
+            if st.lang != "nl"
+            else f"Oké, dus dat is: {cart}. Klopt dat?",
+        )
         return True
 
     async def process_utterance(self, ws: WebSocket, pcm: bytes) -> None:
@@ -1802,6 +1936,11 @@ class SessionController:
             # ==========================================================
             # 5) Slot handling (Intent-aware, non-greedy)
             # ==========================================================
+            if getattr(st, "pending_disambiguation", None):
+                consumed = await self._handle_pending_disambiguation(ws, transcript)
+                if consumed:
+                    return
+
             if st.pending_choice == "nan_variant":
                 consumed = await self._handle_pending_nan_variant(ws, transcript)
                 if consumed:
@@ -2336,14 +2475,32 @@ class SessionController:
             variant = None
 
             if st.menu and allow_deterministic_add:
-                # Optional orchestrator for very short/ambiguous items
-                orch_id = self._maybe_orchestrator_match_item(st.menu, transcript, qty=effective_qty)
+
+                # RC1-4: metadata-driven category-head disambiguation (MUST RUN FIRST)
+                if not getattr(st, "pending_disambiguation", None):
+                    payload = self._maybe_trigger_menu_disambiguation(transcript, default_qty=int(effective_qty or 1))
+                    if payload:
+                        st.pending_disambiguation = DisambiguationContext.from_dict(payload)
+                        await self.clear_thinking(ws)
+                        opts = ", ".join(st.pending_disambiguation.options or [])
+                        await self._speak(
+                            ws,
+                            f"We have {opts}. Which {st.pending_disambiguation.parent_label} would you like?"
+                            if st.lang != "nl"
+                            else f"We hebben {opts}. Welke {st.pending_disambiguation.parent_label} wil je?",
+                        )
+                        return
+
+                # Optional orchestrator for very short/ambiguous leaf-only utterances
+                orch_id = await self._maybe_orchestrator_match_item(
+                    ws, st.menu, transcript, qty=effective_qty
+                )
                 if orch_id:
                     st.order.add(orch_id, max(1, int(effective_qty or 1)))
                     added_any = True
                     added_ids.append(orch_id)
 
-                # Standard deterministic matcher (alias_map hits)
+                # Standard deterministic matcher (leaf items only)
                 if not added_any:
                     adds = parse_add_item(st.menu, transcript, qty=effective_qty)
 
