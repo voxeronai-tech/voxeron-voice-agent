@@ -2121,8 +2121,15 @@ class SessionController:
                     await self._speak(ws, "No problem. What would you like to change?" if st.lang != "nl" else "Prima. Wat wil je wijzigen?")
                     return
 
-                logger.info("RC3: exit pending_confirm latch on non-binary input: %r", transcript)
-                st.pending_confirm = False
+                # Non-binary input: do NOT exit pending_confirm and do NOT fall through.
+                # Keep latch and ask for explicit yes/no.
+                await self._speak(
+                    ws,
+                    "Please say yes or no."
+                    if st.lang != "nl"
+                    else "Zeg alsjeblieft ja of nee.",
+                )
+                return
                 # fall through to normal flow (do NOT reprompt)
 
             # Total amount / price query: we don't have pricing, but we can summarize and offer to confirm.
@@ -2225,8 +2232,6 @@ class SessionController:
                 )
                 return
 
-                logger.info("RC3: exit pending_confirm latch on non-binary input: %r", transcript)
-                st.pending_confirm = False
                 # fall through to normal flow (do NOT prompt yes/no)
 
             if self._is_order_summary_query(transcript) and st.menu:
