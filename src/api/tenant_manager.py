@@ -490,4 +490,62 @@ class TenantManager:
         out = self._gate_naam_to_naan(cfg, out)
 
         return out
+    def strip_affirmation_prefix(
+        self,
+        cfg: Optional[TenantConfig],
+        text: str,
+        lang: str,
+    ) -> Tuple[str, bool, str]:
+        """
+        Tenant-scoped prefix stripping:
+        If the utterance starts with an affirmation trigger AND has remainder,
+        strip the trigger and return the remainder so deterministic parsing can proceed.
+
+        Examples (nl):
+          "doe maar de chicken" -> "chicken" (stripped=True)
+          "ja doe maar butter chicken" -> "butter chicken" (stripped=True)
+          "doe maar" -> "doe maar" (stripped=False)  # no remainder
+        """
+        raw = (text or "").strip()
+        if not raw:
+            return raw, False, ""
+
+        triggers = self.get_intent_for_language(cfg, lang, "affirmation_triggers", default=[])
+        if not triggers:
+            return raw, False, ""
+
+        # Prefer longest match first ("ja doe maar" before "doe maar")
+        trig_list = sorted(
+            [t.strip() for t in triggers if (t or "").strip()],
+            key=len,
+            reverse=True,
+        )
+
+        low = raw.lower().strip()
+
+        for trig in trig_list:
+            tl = trig.lower().strip()
+            if not tl:
+                continue
+
+            # Exact only -> do NOT strip (no remainder)
+            if low == tl:
+                return raw, False, trig
+
+            if low.startswith(tl):
+                # strip trigger; keep remainder if non-empty
+                after = raw[len(trig):].lstrip(" \t,.;:!?")
+                if not after:
+                    return raw, False, trig
+
+                # Optional: strip leading articles (nl/en) to help item matching
+                after_low = after.lower()
+                for art in ("de ", "het ", "een ", "the ", "a ", "an "):
+                    if after_low.startswith(art):
+                        after = after[len(art):].lstrip()
+                        break
+
+                return after, True, trig
+
+        return raw, False, ""
 

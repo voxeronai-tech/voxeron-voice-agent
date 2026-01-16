@@ -1774,8 +1774,19 @@ class SessionController:
                 if applied:
                     logger.info("alias_fix applied=%s", applied)
 
-            logger.info("STT: %s", transcript)
-            await self.send_user_text(ws, transcript)
+            # Preserve what the user said for UI/logging
+            display_transcript = transcript
+
+            # Strip tenant-scoped affirmation prefixes only for parsing (e.g., "doe maar de chicken" -> "chicken")
+            if tm and getattr(st, "tenant_cfg", None) is not None and hasattr(tm, "strip_affirmation_prefix"):
+                transcript2, stripped, trig = tm.strip_affirmation_prefix(st.tenant_cfg, transcript, st.lang)
+                if stripped:
+                    logger.info("intent_prefix_strip matched=%r before=%r after=%r", trig, transcript, transcript2)
+                    transcript = transcript2
+
+            logger.info("STT: %s", display_transcript)
+            await self.send_user_text(ws, display_transcript)
+
             tnorm = " " + norm_simple(transcript) + " "
 
             now = time.time()
