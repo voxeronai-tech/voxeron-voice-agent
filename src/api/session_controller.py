@@ -1522,7 +1522,6 @@ class SessionController:
         st.cart_check_snapshot = cart
         st.cart_check_retries = 0
 
-        logger.info("cart_check_set source=pending_disambiguation snapshot=%r", cart)
         await self._speak(
             ws,
             f"Okay, so that's {cart}. Is that correct?"
@@ -2025,9 +2024,15 @@ class SessionController:
                         await self._speak(ws, f"Great. {self._say_anything_else()}")
                         return
                     st.pending_name = True
+
+                    # Name capture must own the next turn; do not allow confirmation/cart-check latches to intercept the name.
+                    st.pending_confirm = False
+                    st.pending_cart_check = False
+
                     msg = "Great. What name should I put the order under?" if st.lang != "nl" else "Prima. Op welke naam mag ik de bestelling zetten?"
                     await self._speak(ws, msg)
                     return
+
 
                 msg = "Okay. What is the delivery address, please?" if st.lang != "nl" else "Oké. Wat is het bezorgadres?"
                 await self._speak(ws, msg)
@@ -2174,36 +2179,52 @@ class SessionController:
                 )
                 return
 
-            if st.pending_confirm:
-                await self.clear_thinking(ws)
-                if self._is_affirm(transcript):
-                    st.pending_confirm = False
-                    st.order_finalized = True
-                    safe = _address_name((st.customer_name or "").strip())
-                    if st.lang != "nl":
+                if st.pending_confirm:
+                    await self.clear_thinking(ws)
+
+                    # Use the same robust yes/no classifier as cart_check
+                    yn = self.oa.fast_yes_no(transcript) if hasattr(self.oa, "fast_yes_no") else None
+
+                    if yn == "AFFIRM" or self._is_affirm(transcript):
+                        st.pending_confirm = False
+                        st.order_finalized = True
+                        safe = _address_name((st.customer_name or "").strip())
+                        if st.lang != "nl":
+                            await self._speak(
+                                ws,
+                                f"Perfect. Your order is confirmed for pickup under {safe}."
+                                if safe
+                                else "Perfect. Your order is confirmed for pickup."
+                            )
+                        else:
+                            await self._speak(
+                                ws,
+                                f"Top. Je bestelling is bevestigd voor afhalen op naam van {safe}."
+                                if safe
+                                else "Top. Je bestelling is bevestigd voor afhalen."
+                            )
+                        return
+
+                    if yn == "NEGATE" or self._is_negative(transcript):
+                        st.pending_confirm = False
                         await self._speak(
                             ws,
-                            f"Perfect. Your order is confirmed for pickup under {safe}."
-                            if safe
-                            else "Perfect. Your order is confirmed for pickup."
+                            "No problem. What would you like to change?"
+                            if st.lang != "nl"
+                            else "Geen probleem. Wat wil je aanpassen?",
                         )
-                    else:
-                        await self._speak(
-                            ws,
-                            f"Top. Je bestelling is bevestigd voor afhalen op naam van {safe}."
-                            if safe
-                            else "Top. Je bestelling is bevestigd voor afhalen."
-                        )
-                    return
-                if self._is_negative(transcript):
-                    st.pending_confirm = False
-                    await self._speak(
-                        ws,
-                        "No problem. What would you like to change?"
-                        if st.lang != "nl"
-                        else "Geen probleem. Wat wil je aanpassen?",
-                    )
-                    return
+                        return
+
+                # Non-binary input: do NOT fall through into ordering/LLM.
+                # Keep latch and ask for yes/no.
+                await self._speak(
+                    ws,
+                    "Please say yes or no."
+                    if st.lang != "nl"
+                    else "Zeg alsjeblieft ja of nee.",
+                )
+                return
+
                 logger.info("RC3: exit pending_confirm latch on non-binary input: %r", transcript)
                 st.pending_confirm = False
                 # fall through to normal flow (do NOT prompt yes/no)
@@ -2228,6 +2249,9 @@ class SessionController:
                     return
                 if st.fulfillment_mode == "pickup" and not st.customer_name:
                     st.pending_name = True
+                     # Name capture must own the next turn; do not allow confirmation/cart-check latches to intercept the name.
+                    st.pending_confirm = False
+                    st.pending_cart_check = False
                     await self._speak(ws, "Great. What name should I put the order under?" if st.lang != "nl" else "Prima. Op welke naam mag ik de bestelling zetten?")
                     return
                 cart = st.order.summary(st.menu) or "Empty"
@@ -2266,6 +2290,10 @@ class SessionController:
                 # If pickup and no name yet, we still need a name
                 if st.fulfillment_mode == "pickup" and not st.customer_name:
                     st.pending_name = True
+
+                    # Name capture must own the next turn; do not allow confirmation/cart-check latches to intercept the name.
+                    st.pending_confirm = False
+                    st.pending_cart_check = False
                     await self.clear_thinking(ws)
                     await self._speak(ws, "Great. What name should I put the order under?" if st.lang != "nl" else "Prima. Op welke naam mag ik de bestelling zetten?")
                     return
@@ -2292,6 +2320,9 @@ class SessionController:
                         await self._speak(ws, f"You're set for pickup under {st.customer_name}." if st.lang != "nl" else f"Je staat op afhalen op naam van {st.customer_name}.")
                     else:
                         st.pending_name = True
+                        # Name capture must own the next turn; do not allow confirmation/cart-check latches to intercept the name.
+                        st.pending_confirm = False
+                        st.pending_cart_check = False
                         await self._speak(ws, "Great. What name should I put the order under?" if st.lang != "nl" else "Prima. Op welke naam mag ik de bestelling zetten?")
                 else:
                     await self._speak(ws, "You're set for delivery. Anything else you'd like to add?" if st.lang != "nl" else "Je staat op bezorgen. Wil je nog iets toevoegen?")
@@ -2542,21 +2573,10 @@ class SessionController:
 
                 # RC1-4: metadata-driven category-head disambiguation (MUST RUN FIRST)
                 if not getattr(st, "pending_disambiguation", None):
-                    # DEBUG: confirm disambiguation is reachable and menu metadata exists
-                    logger.info(
-                        "disamb_gate menu=%s allow_det=%s amb_keys=%s transcript=%r",
-                        bool(st.menu),
-                        bool(allow_deterministic_add),
-                        list((getattr(st.menu, "ambiguity_options", {}) or {}).keys()),
-                        transcript,
-                    )
 
                     payload = self._maybe_trigger_menu_disambiguation(
                         transcript, default_qty=int(effective_qty or 1)
                     )
-
-                    # DEBUG: show why we did/didn't trigger
-                    logger.info("disamb_payload=%r", payload)
 
                     if payload:
                         st.pending_disambiguation = DisambiguationContext.from_dict(payload)
@@ -2868,6 +2888,9 @@ class SessionController:
 
                     if st.fulfillment_mode == "pickup" and not st.customer_name:
                         st.pending_name = True
+                        #Name capture must own the next turn; do not allow confirmation/cart-check latches to intercept the name.
+                        st.pending_confirm = False
+                        st.pending_cart_check = False
                         await self._speak(ws, "Great. What name should I put the order under?")
                         return
 

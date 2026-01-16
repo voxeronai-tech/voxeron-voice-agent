@@ -11,7 +11,10 @@ from openai import AsyncOpenAI
 
 from .audio import pcm16_to_wav
 
-from src.api.intent import norm_simple 
+from src.api.intent import norm_simple
+
+from typing import Optional
+import re
 
 logger = logging.getLogger("taj-agent")
 
@@ -228,32 +231,40 @@ class OpenAIClient:
     # -------------------------
     # OPTIONAL: ultra-fast intent helpers (no LLM)
     # -------------------------
-    from src.api.intent import norm_simple  # add at top of file if not already imported
 
     def fast_yes_no(self, text: str) -> Optional[str]:
         """
         Returns 'AFFIRM'/'NEGATE' for short confirmations, else None.
-        Must be robust to punctuation and common confirmation phrases.
+        Robust to punctuation, apostrophes, and common STT artifacts.
         """
-        t = (text or "").strip().lower()
-        if not t:
+        raw = (text or "")
+        if not raw.strip():
             return None
 
-        # Strip common trailing punctuation produced by STT (e.g. "Yes.")
-        t = t.strip(" \t\r\n.!?,'\";:()[]{}")
+        t = raw.strip().lower()
 
-        # Fast exact matches
-        if t in {"yes", "yeah", "yep", "ok", "okay", "sure", "ja", "jawel", "prima", "oke", "correct"}:
+        # Step 1: remove apostrophes (covers "that's")
+        t = t.replace("'", "").replace("’", "")
+
+        # Step 2: remove remaining punctuation into spaces
+        t_norm = re.sub(r"[^a-z0-9\s]", " ", t)
+        t_norm = " ".join(t_norm.split()).strip()
+
+        # Step 3: repair common STT split-contractions (covers "that s correct")
+        # e.g. "that s" -> "thats", "it s" -> "its"
+        t_norm = re.sub(r"\b(that|it|there|here)\s+s\b", r"\1s", t_norm)
+
+        if not t_norm:
+            return None
+
+        if t_norm in {"yes", "yeah", "yep", "ok", "okay", "sure", "ja", "jawel", "prima", "oke", "correct"}:
             return "AFFIRM"
-        if t in {"no", "nope", "nee", "neen", "nah"}:
+        if t_norm in {"no", "nope", "nee", "neen", "nah"}:
             return "NEGATE"
 
-        # Short phrase matches (common in your traces)
-        # Keep these conservative (confirmation-only)
-        if t in {
+        if t_norm in {
             "that is correct",
             "thats correct",
-            "that's correct",
             "this is correct",
             "dat is correct",
             "dat klopt",
@@ -262,13 +273,12 @@ class OpenAIClient:
         }:
             return "AFFIRM"
 
-        if t in {
+        if t_norm in {
             "that is not correct",
             "thats not correct",
-            "that's not correct",
             "dat klopt niet",
             "niet correct",
-            "klopt niet"
+            "klopt niet",
             "dat is niet goed",
         }:
             return "NEGATE"

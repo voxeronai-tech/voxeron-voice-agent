@@ -533,19 +533,27 @@ class TenantManager:
                 return raw, False, trig
 
             if low.startswith(tl):
-                # strip trigger; keep remainder if non-empty
-                after = raw[len(trig):].lstrip(" \t,.;:!?")
+                # Boundary check: do NOT match inside a longer word (e.g. "oké" must NOT match trigger "ok")
+                next_idx = len(tl)
+                if next_idx < len(low):
+                    nxt = low[next_idx]
+                    # If the next char is a letter/number, then trigger is embedded in a word -> ignore
+                    if nxt.isalnum():
+                        continue
+
+                after = raw[len(trig):].lstrip(" ,.!?:;")
                 if not after:
                     return raw, False, trig
 
-                # Optional: strip leading articles (nl/en) to help item matching
-                after_low = after.lower()
+                # Optional: strip leading articles (nl/en)
+                after2 = after
+                after2_low = after2.lower()
                 for art in ("de ", "het ", "een ", "the ", "a ", "an "):
-                    if after_low.startswith(art):
-                        after = after[len(art):].lstrip()
+                    if after2_low.startswith(art):
+                        after2 = after2[len(art):].lstrip()
                         break
 
-                return after, True, trig
+                return after2, True, trig
 
         return raw, False, ""
 

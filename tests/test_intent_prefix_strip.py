@@ -33,3 +33,18 @@ def test_do_not_strip_when_only_prefix():
     out, stripped, _ = tm.strip_affirmation_prefix(cfg, "doe maar", "nl")
     assert stripped is False
     assert out == "doe maar"
+
+def test_strip_affirmation_prefix_does_not_match_inside_word():
+    from src.api.tenant_manager import TenantManager
+
+    tm = TenantManager(base_dir="tenants")
+
+    class Cfg:
+        base_language = "en"
+        intents = {"en": {"affirmation_triggers": ["ok", "okay", "yes"]}}
+
+    cfg = Cfg()
+
+    out, stripped, trig = tm.strip_affirmation_prefix(cfg, "oké", "en")
+    assert stripped is False
+    assert out == "oké"
