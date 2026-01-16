@@ -755,8 +755,40 @@ class SessionController:
             return None
 
         # Split into segments so "butter chicken and two biryani" doesn't match biryani option "chicken"
-        parts = re.split(r"\b(?:and|en)\b", transcript or "", flags=re.IGNORECASE)
-        parts = [p.strip(" ,.!?") for p in parts if (p or "").strip()]
+        # Split into segments so "butter chicken two biryani" doesn't let biryani "inherit" chicken.
+        # We first split on conjunctions/commas (if present), then ALSO split on repeated qty tokens
+        # because STT often drops punctuation/commas.
+        raw_parts = re.split(r"\b(?:and|en)\b|[,;]", transcript or "", flags=re.IGNORECASE)
+        raw_parts = [p.strip(" ,.!?") for p in raw_parts if (p or "").strip()]
+
+        parts: List[str] = []
+
+        for seg in raw_parts:
+            toks = norm_simple(seg).split()
+            if not toks:
+                continue
+
+            start = 0
+            for i in range(1, len(toks)):
+                # Treat any token that parses as a quantity (1..10) as a new item boundary
+                try:
+                    from src.api.parser.quantity import extract_quantity_1_to_10
+                    if extract_quantity_1_to_10(toks[i]):
+                        chunk = " ".join(toks[start:i]).strip()
+                        if chunk:
+                            parts.append(chunk)
+                        start = i
+                except Exception:
+                    # If quantity parser fails, don't split; keep deterministic behavior
+                    pass
+
+            last = " ".join(toks[start:]).strip()
+            if last:
+                parts.append(last)
+
+        # Safety fallback: ensure we have at least one segment
+        if not parts:
+            parts = [norm_simple(transcript or "").strip()]
 
         for head, opts in amb.items():
             h = norm_simple(str(head))
@@ -780,7 +812,19 @@ class SessionController:
 
             for seg_raw, seg_norm in head_segments:
                 # If this segment already contains an option, leaf is specified → no disambiguation
-                if any(f" {o} " in seg_norm for o in opt_list):
+                # If this segment already contains an option near the head token, leaf is specified → no disambiguation.
+                tokens = norm_simple(seg_raw).split()
+                try:
+                    hi = tokens.index(h)  # head index
+                except ValueError:
+                    continue
+
+                # window: [hi-2 .. hi+2]
+                lo = max(0, hi - 2)
+                up = min(len(tokens), hi + 3)
+                window = set(tokens[lo:up])
+
+                if any(o in window for o in opt_list):
                     continue
 
                 # qty extracted from the segment containing the head
@@ -1478,6 +1522,7 @@ class SessionController:
         st.cart_check_snapshot = cart
         st.cart_check_retries = 0
 
+        logger.info("cart_check_set source=pending_disambiguation snapshot=%r", cart)
         await self._speak(
             ws,
             f"Okay, so that's {cart}. Is that correct?"
@@ -1627,6 +1672,8 @@ class SessionController:
                     if applied:
                         logger.info("alias_fix(cart_check) applied=%s", applied)
 
+                # Show user utterance in UI transcript during cart confirmation too
+                await self.send_user_text(ws, transcript)
                 yn = self.oa.fast_yes_no(transcript) if hasattr(self.oa, "fast_yes_no") else None
                 # RC fix: allow "yes, ..." / "ja, ..." during cart_check and keep processing the remainder
                 t0 = (transcript or "").strip()
@@ -2030,11 +2077,17 @@ class SessionController:
                 safe = _address_name((st.customer_name or "").strip())
 
                 if st.lang != "nl":
-                    await self._speak(ws, f"Thanks, {safe}. To confirm: {cart}, for {mode_part}. Is that correct?" if cart else f"Thanks, {safe}. Is that correct?")
+                    thank = f"Thanks, {safe}." if safe else "Thanks."
+                    if cart:
+                        await self._speak(ws, f"{thank} To confirm: {cart}, for {mode_part}. Is that correct?")
+                    else:
+                        await self._speak(ws, f"{thank} Is that correct?")
                 else:
-                    await self._speak(ws, f"Dank je, {safe}. Ter bevestiging: {cart}, voor {mode_part}. Klopt dat?" if cart else f"Dank je, {safe}. Klopt dat?")
-                return
-
+                    thank = f"Dank je, {safe}." if safe else "Dank je."
+                    if cart:
+                        await self._speak(ws, f"{thank} Ter bevestiging: {cart}, voor {mode_part}. Klopt dat?")
+                    else:
+                        await self._speak(ws, f"{thank} Klopt dat?")
 
             # ==========================================================
             # 5b) Checkout / confirmation guards (RC3)
@@ -2489,7 +2542,22 @@ class SessionController:
 
                 # RC1-4: metadata-driven category-head disambiguation (MUST RUN FIRST)
                 if not getattr(st, "pending_disambiguation", None):
-                    payload = self._maybe_trigger_menu_disambiguation(transcript, default_qty=int(effective_qty or 1))
+                    # DEBUG: confirm disambiguation is reachable and menu metadata exists
+                    logger.info(
+                        "disamb_gate menu=%s allow_det=%s amb_keys=%s transcript=%r",
+                        bool(st.menu),
+                        bool(allow_deterministic_add),
+                        list((getattr(st.menu, "ambiguity_options", {}) or {}).keys()),
+                        transcript,
+                    )
+
+                    payload = self._maybe_trigger_menu_disambiguation(
+                        transcript, default_qty=int(effective_qty or 1)
+                    )
+
+                    # DEBUG: show why we did/didn't trigger
+                    logger.info("disamb_payload=%r", payload)
+
                     if payload:
                         st.pending_disambiguation = DisambiguationContext.from_dict(payload)
                         await self.clear_thinking(ws)
