@@ -28,6 +28,9 @@ from .policy import (
 from .services.openai_client import OpenAIClient
 from .prompts import build_system_prompt
 
+from .telemetry import get_telemetry_emitter
+from .telemetry.emitter import TelemetryContext
+
 # Optional (RC3): Cognitive Orchestrator (safe import)
 try:
     from .orchestrator.orchestrator import CognitiveOrchestrator, OrchestratorRoute
@@ -287,6 +290,15 @@ def _address_name(full_name: str) -> Optional[str]:
 
     return first
 
+def _telemetry_ctx(self) -> TelemetryContext:
+    st = self.state
+    return TelemetryContext(
+        session_id=getattr(st, "session_id", None)
+            or getattr(st, "session_uuid", None)
+            or getattr(st, "ws_id", "unknown"),
+        tenant_id=getattr(st, "tenant_id", None),
+        domain=getattr(st, "domain", None),
+    )
 
 _QTY_WORDS: Dict[str, int] = {
     # NL
@@ -1476,6 +1488,32 @@ class SessionController:
                 break
 
         if not chosen:
+            # S1-4 telemetry: chosen option still didn't map to a menu item
+            try:
+                if hasattr(self, "_telemetry"):
+                    st2 = self.state
+                    sid = (
+                        getattr(st2, "session_id", None)
+                        or getattr(st2, "session_uuid", None)
+                        or getattr(st2, "ws_id", None)
+                        or "unknown"
+                    )
+                    tctx = TelemetryContext(
+                        session_id=str(sid),
+                        tenant_id=str(getattr(st2, "tenant_ref", "unknown")),
+                        domain=str(getattr(st2, "tenant_ref", "unknown")),
+                    )
+                    if hasattr(self._telemetry, "emit_reason_only"):
+                        self._telemetry.emit_reason_only(
+                            ctx=tctx,
+                            utterance=raw,
+                            parser_status="DISAMBIGUATION",
+                            parser_reason="UNKNOWN_ITEM",
+                            execution_time_ms=0.0,
+                            confidence=0.0,
+                        )
+            except Exception:
+                pass
             await self.clear_thinking(ws)
             opts = ", ".join(ctx.options or [])
             await self._speak(
