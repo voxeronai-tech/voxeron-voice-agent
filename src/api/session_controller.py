@@ -2966,6 +2966,68 @@ class SessionController:
             out = await llm_turn(self.oa, st, transcript, menu_context)
             reply = (out.get("reply") or "").strip()
 
+            # --- S1-4 telemetry: observe LLM output for spice + menu-scope drift (no behavior changes) ---
+            try:
+                if reply and hasattr(self, "_telemetry") and hasattr(self._telemetry, "emit_reason_only"):
+                    lt = reply.lower()
+                    mc = (menu_context or "").lower()
+
+                    is_spice = any(w in lt for w in (
+                        "spicy", "spicier", "spiciest", "heat", "hotter",
+                        "pittig", "pittiger", "pittigst", "scherp",
+                    ))
+
+                    drift = False
+                    if mc:
+                        # Heuristic: extract 2-5 word "dish-like" phrases and see if they exist in menu_context.
+                        # Telemetry-only: false positives are acceptable.
+                        import re as _re
+                        phrases = _re.findall(r"\b[a-z][a-z]+(?:\s+[a-z][a-z]+){1,4}\b", lt)
+
+                        # Filter to phrases that include common dish tokens (keeps noise down)
+                        dishish = [
+                            p for p in phrases
+                            if any(k in p for k in (
+                                "chicken", "lamb", "tikka", "karahi", "dhansak", "masala",
+                                "biryani", "naan", "prawn", "mushroom", "veg", "vegetarian",
+                            ))
+                        ]
+
+                        for p in dishish[:25]:
+                            if p and (p not in mc):
+                                drift = True
+                                break
+
+                    st2 = self.state
+                    sid = (
+                        getattr(st2, "session_id", None)
+                        or getattr(st2, "session_uuid", None)
+                        or getattr(st2, "ws_id", None)
+                        or "unknown"
+                    )
+                    tctx = TelemetryContext(
+                        session_id=str(sid),
+                        tenant_id=str(getattr(st2, "tenant_ref", "unknown")),
+                        domain=str(getattr(st2, "tenant_ref", "unknown")),
+                    )
+
+                    reason = "LLM_TURN_SPICE" if is_spice else "LLM_TURN_GENERAL"
+                    if drift and is_spice:
+                        reason = "LLM_SCOPE_VIOLATION_SPICE"
+                    elif drift:
+                        reason = "LLM_SCOPE_VIOLATION_GENERAL"
+
+                    self._telemetry.emit_reason_only(
+                        ctx=tctx,
+                        utterance=(transcript or ""),
+                        parser_status="LLM",
+                        parser_reason=reason,
+                        execution_time_ms=0.0,
+                        confidence=0.0,
+                    )
+            except Exception:
+                pass
+
             # If the LLM turn mutated the cart, we must close the loop deterministically.
             # This prevents "Let me update your order..." dead-ends where the client waits forever.
             cart_after_llm = st.order.summary(st.menu) if st.menu else ""
