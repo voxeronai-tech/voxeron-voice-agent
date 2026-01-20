@@ -635,6 +635,7 @@ class SessionController:
         self.send_thinking = send_thinking
         self.clear_thinking = clear_thinking
         self.tts_end = tts_end
+        self._telemetry = get_telemetry_emitter()
 
     # -------------------------
     # UX strings
@@ -1143,10 +1144,6 @@ class SessionController:
         if self.state.tenant_ref == "taj_mahal":
             alias_map.update(self._taj_overlay_alias_map(menu))
 
-        # --- S1-4 telemetry wiring (best-effort, no controller DB logic) ---
-        if not hasattr(self, "_telemetry"):
-            self._telemetry = TelemetryEmitter()
-
         st = self.state
         sid = (
             getattr(st, "session_id", None)
@@ -1197,10 +1194,6 @@ class SessionController:
         alias_map: Dict[str, str] = dict(menu.alias_map or {})
         if self.state.tenant_ref == "taj_mahal":
             alias_map.update(self._taj_overlay_alias_map(menu))
-
-        # --- S1-4 telemetry wiring (best-effort, no controller DB logic) ---
-        if not hasattr(self, "_telemetry"):
-            self._telemetry = TelemetryEmitter()
 
         st = self.state
         sid = (

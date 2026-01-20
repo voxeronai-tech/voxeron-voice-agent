@@ -80,8 +80,8 @@ class TelemetryEmitter:
     So we provide a default asyncpg-backed insert_fn when none is passed.
     """
 
-    def __init__(self, insert_fn: Optional[InsertFn] = None, *, timeout_s: float = 0.25) -> None:
-        self._timeout_s = timeout_s
+    def __init__(self, insert_fn: Optional[InsertFn] = None, *, timeout_s: float = 2.0) -> None:
+        self._timeout_s = float(os.getenv("TELEMETRY_TIMEOUT_S", str(timeout_s)))
         self._enabled = os.getenv("TELEMETRY_ENABLED", "1").strip() not in ("0", "false", "False")
         self._insert_fn: InsertFn = insert_fn or self._default_asyncpg_insert
 
