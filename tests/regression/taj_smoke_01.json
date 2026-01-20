@@ -1,0 +1,15 @@
+{
+  "tenant_ref": "taj_mahal",
+  "init": {
+    "pending_fulfillment": true
+  },
+  "turns": [
+    { "user": "pickup" },
+    { "user": "jan van veen" },
+    { "user": "yes" }
+  ],
+  "expect": {
+    "order_finalized": true,
+    "customer_name": "jan van veen"
+  }
+}
