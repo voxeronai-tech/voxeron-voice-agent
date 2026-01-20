@@ -483,6 +483,12 @@ async def llm_turn(oa: OpenAIClient, state: SessionState, user_text: str, menu_c
     obj = _safe_json_loads(txt)
     return obj if obj else {"reply": txt, "add": [], "remove": []}
 
+async def process_text_turn(self, ws, transcript: str) -> None:
+    # mimic the post-STT path: same slot handling, deterministic add, llm fallback, etc.
+    # This should call into the same internal function that process_utterance reaches
+    # after transcript is known.
+    await self._process_transcript(ws, transcript)
+
 # -------------------------
 # Naan keyword parsing (SCOPED)
 # -------------------------
@@ -558,6 +564,38 @@ def _extract_nan_variant_keyword_scoped(text: str) -> Optional[str]:
 
     return None
 
+def _emit_lifecycle(self, reason: str) -> None:
+    """
+    S1-4A: lifecycle instrumentation (fire-and-forget).
+    Must never affect runtime behavior.
+    """
+    try:
+        if not hasattr(self, "_telemetry") or not hasattr(self._telemetry, "emit_reason_only"):
+            return
+
+        st = self.state
+        sid = (
+            getattr(st, "session_id", None)
+            or getattr(st, "session_uuid", None)
+            or getattr(st, "ws_id", None)
+            or "unknown"
+        )
+        tctx = TelemetryContext(
+            session_id=str(sid),
+            tenant_id=str(getattr(st, "tenant_ref", "unknown")),
+            domain=str(getattr(st, "tenant_ref", "unknown")),
+        )
+
+        self._telemetry.emit_reason_only(
+            ctx=tctx,
+            utterance="",
+            parser_status="LIFECYCLE",
+            parser_reason=str(reason),
+            execution_time_ms=0.0,
+            confidence=0.0,
+      )
+    except Exception:
+        pass
 
 class SessionController:
     def __init__(
