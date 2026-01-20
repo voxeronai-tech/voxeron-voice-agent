@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+echo "🚀 [Voxeron Gate] Verifying Deterministic Integrity..."
+pytest -q tests/regression/ tests/test_telemetry_redaction.py
+echo "✅ [Voxeron Gate] Passed. Proceeding to commit."
