@@ -1,4 +1,0 @@
-[submodule "architecture"]
-	path = architecture
-	url = https://github.com/voxeronai-tech/voxeron-architecture.git
-	branch = main
