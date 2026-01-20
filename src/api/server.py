@@ -407,6 +407,12 @@ async def _handle_ws(ws: WebSocket) -> None:
         clear_thinking=clear_thinking,
         tts_end=tts_end,
     )
+    
+    # S1-4A lifecycle telemetry (fire-and-forget): call started
+    try:
+        controller._emit_lifecycle("CALL_STARTED")
+    except Exception:
+        pass
 
     try:
         state.heartbeat_task = asyncio.create_task(heartbeat_loop(ws, controller))

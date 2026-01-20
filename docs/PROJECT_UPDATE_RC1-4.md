@@ -1,246 +1,234 @@
-Below is a **clean, copy-pasteable project document** you can commit as
-`docs/PROJECT_UPDATE_RC1-4.md`.
+Below is an **updated, final handover** reflecting everything that actually landed in Git, including the successful RC1-4 disambiguation merge, cleanup decisions, and the correct continuation point.
 
-It is written to **freeze the architectural decision**, explain *why* we stopped, *what changes*, and *how to resume in the next chat without drift*.
-
-No guessing, no extra scope.
+This version **replaces** the previous handover.
+You can copy-paste it verbatim into a new chat.
 
 ---
 
-````md
-# PROJECT UPDATE — RC1-4
-## Voxeron Voice Agent
+# VOXERON VOICE AGENT — HANDOVER PROMPT (RC1-4)
 
-**Date:** 2026-01-12  
-**Status:** Architectural correction approved  
-**Scope:** Deterministic ordering, disambiguation, scalability
+## 🔒 Canonical Context Rule (MANDATORY)
 
----
+This handover is the **single source of truth** for resuming work.
+Chat memory is **not authoritative**.
 
-## 1. Context & Reason for This Update
+**Reality = Git repository + this handover.**
 
-During RC1-4 stabilization, a structural issue was identified:
+On resume:
 
-- “Naan” works due to **hardcoded, item-specific logic**
-- “Biryani”, “Paneer”, “Vegetarian”, etc. fail or behave inconsistently
-- Fixing each item individually would introduce **unbounded technical debt**
-
-This document records a **formal architectural intervention** to stop vertical, item-specific logic and replace it with a **horizontal, metadata-driven model**.
-
-This decision is **locked** for RC1-4 and beyond.
+1. Ask for `git status -sb`
+2. Verify branch and commits
+3. Continue **only** from here
 
 ---
 
-## 2. Architectural Decision (LOCKED)
+## 1. Project & Architectural Direction (LOCKED)
 
-### ❌ What We Will NOT Do
+**Project:** Voxeron Voice Agent
+**Goal:** Deterministic, production-grade voice ordering (restaurant first, horizontal platform later)
 
-- No new methods or branches containing food names  
-  (`naan`, `biryani`, `paneer`, etc.)
-- No duplication of `_handle_pending_nan_variant` for other items
-- No fixes by expanding `aliases.json` to encode taxonomy
-- No controller logic that “knows” menu structure
+### Architectural principles (NON-NEGOTIABLE)
 
----
+* ❌ No item-specific logic in `SessionController`
+* ❌ No menu knowledge encoded in controller conditionals
+* ❌ No conversational phrases in STT prompts
+* ✅ Deterministic parser first, LLM last
+* ✅ Generic slot latches driven by menu metadata
+* ✅ Typed state objects for multi-turn flows
+* ✅ Controller orchestrates state, never interprets language
 
-### ✅ What We WILL Do
-
-We introduce a **Category Head** abstraction.
-
-A **Category Head** is:
-- a **non-orderable menu node**
-- representing a group of variants (leaf items)
-- resolved deterministically before cart mutation
-
-Examples:
-- Biryani → {Chicken, Lamb, Vegetable}
-- Naan → {Plain, Garlic, Cheese}
-- Paneer → {Butter Paneer, Palak Paneer}
+This direction is **approved, implemented, and frozen**.
 
 ---
 
-## 3. Core Principle: Horizontal Logic
+## 2. Current Git State (FACTUAL)
 
-The system must reason in **states**, not **products**.
+### Active branch
 
-### Before (Rejected)
-
-```text
-if "naan" → ask variant
-if "biryani" → ??? (broken)
-````
-
-### After (Approved)
-
-```text
-if category mentioned without leaf → DISAMBIGUATE(category, options)
+```
+feature/S1-4-telemetry-emitter
 ```
 
-This applies to **all menu categories**, automatically.
+### HEAD commit
 
----
-
-## 4. Required Architectural Shifts
-
-### Shift A — Metadata-Driven Parsing (S1-3)
-
-* Menu items gain structural metadata
-* Parser detects **category vs leaf**, not strings
-
-Parser responsibility:
-
-* Detect mention of a category without a variant
-* Emit `DISAMBIGUATE` with options
-
-Parser must **not** contain food names.
-
----
-
-### Shift B — Single Generic Disambiguation Slot
-
-* `_handle_pending_nan_variant` is deprecated
-* `_handle_pending_disambiguation` becomes the **only** variant latch
-
-Controller rule:
-
-> If `pending_disambiguation` is set, **no other ordering logic runs**
-
----
-
-### Shift C — Dynamic Prompting
-
-Prompts are constructed from parser data only:
-
-```text
-“We have {options}. Which {category} would you like?”
+```
+5242abc RC1-4: category-head disambiguation with typed DisambiguationContext
 ```
 
-No hardcoded prompts.
+### Recent commits (chronological)
+
+1. `75cf048` – Telemetry emitter groundwork
+2. `2d09395` – Architecture freeze: Category Head abstraction
+3. `200882e` – MenuSnapshot ambiguity metadata (Category Heads)
+4. `5242abc` – Typed DisambiguationContext + generic disambiguation latch
+
+Branch is **clean and pushed**.
+Local == origin.
 
 ---
 
-## 5. MenuSnapshot Change (Required)
+## 3. RC Status
 
-Menu ingestion must flag category nodes.
+### RC3
 
-### Example (Conceptual)
+* ✅ **CLOSED**
+* Last stable reference: `rc3-closed-2026-01-09`
+* Behavior baseline for regressions
 
-```json
-{
-  "item_id": "CAT-BIRYANI",
-  "display_name": "Biryani",
-  "is_category": true,
-  "children": ["LAM-051", "KIP-044", "VEG-012"]
-}
-```
+### RC1-4 (CURRENT)
 
-Leaf items reference parent:
+**Theme:** Deterministic orchestration, telemetry, generic disambiguation
 
-```json
-{
-  "item_id": "LAM-051",
-  "display_name": "Lamb Biryani",
-  "parent_id": "CAT-BIRYANI"
-}
-```
+#### Delivered and WORKING
 
-This is the **single source of truth** for ambiguity.
+* `MenuSnapshot.ambiguity_options` (category heads, e.g. biryani, curry, tikka)
+* `DisambiguationContext` dataclass (moved to `src/api/models/state.py`)
+* Generic category-head disambiguation (naan, biryani, paneer, curry, etc.)
+* Controller latch: `pending_disambiguation`
+* Cleaned logging (debug spam removed)
+* Telemetry emitter wired (non-blocking)
 
----
+Example now works correctly:
 
-## 6. RC1-4 Scope Clarification
-
-RC1-4 goal is **stability + correctness**, not full refactor.
-
-Therefore:
-
-### In Scope
-
-* Introduce Category Head metadata
-* Route both Naan and Biryani through generic disambiguation
-* Remove reliance on item-specific controller logic
-* Preserve deterministic behavior and telemetry
-
-### Out of Scope (Post-RC1-4)
-
-* New parser statuses (`PARTIAL_MATCH`)
-* Full menu graph engine
-* UI changes
+> “two butter chicken and two biryani”
+> → system asks **which biryani**, preserves qty = 2
+> → “lamb” resolves to **2× Lamb Biryani**
 
 ---
 
-## 7. Current Git State (at time of update)
+## 4. What Was Intentionally REMOVED
 
-> **IMPORTANT:** This must be verified again when resuming.
+These were **deliberate cleanups**, not regressions:
 
-Expected state when this document was written:
+* ❌ Item-specific naan logic (being phased out)
+* ❌ Regex-based “biryani / chicken / naan” checks in controller
+* ❌ Conversational bias in STT prompt
+* ❌ Debug logs:
+
+  * `DISAMB_PAYLOAD`
+  * `DISAMB_SET`
+  * verbose `ORCH_MATCH transcript=…`
+
+Only **one canonical ORCH_MATCH log** remains (route-level only).
+
+---
+
+## 5. Current Known Issues (OPEN)
+
+### 5.1 Affirmation + item regression (IMPORTANT)
+
+Phrase patterns like:
+
+* “doe maar de chicken”
+* “ja, de lamb”
+
+Previously worked in RC3.
+Now partially broken.
+
+**Confirmed facts:**
+
+* ❌ NOT an STT issue (prompt intentionally de-biased)
+* ❌ NOT a menu metadata issue
+* ✅ Regression introduced during disambiguation refactor
+* Likely cause:
+
+  * affirmation intent handling lost precedence
+  * interaction between confirmation/affirmation and add-item intent
+
+⚠️ **Do NOT fix by adding controller hacks or STT phrases.**
+
+---
+
+## 6. Architectural Guardrails (DO NOT VIOLATE)
+
+### STT
+
+* Bias ONLY with menu terms and phonetics
+* No affirmations, no intents, no conversation glue
+
+### Intents
+
+* “ja”, “doe maar”, “klopt”, “yes”, “correct”
+* Must live in `tenants/*/intents.yaml`
+* Resolved by intent engine / parser
+
+### Controller
+
+* No language interpretation
+* No menu knowledge
+* Only reacts to:
+
+  * parser results
+  * typed state (`pending_*`)
+
+---
+
+## 7. Required First Commands in New Chat
+
+Before **any reasoning**, run and paste:
 
 ```bash
 git status -sb
 ```
 
+Then establish regression baseline:
+
+```bash
+git diff rc3-closed-2026-01-09..HEAD -- src/api/session_controller.py
 ```
-## feature/S1-4-telemetry-emitter
- M src/api/session_controller.py
- M src/api/orchestrator/deterministic_parser.py
- M tenants/taj_mahal/tenant.json
+
+Optional but useful:
+
+```bash
+git diff rc3-closed-2026-01-09..HEAD -- src/api/orchestrator
 ```
 
-No RC3 regression commits have been made.
+---
+
+## 8. Immediate Next Steps (ORDERED)
+
+1. **Do not add features**
+2. Diff RC3 vs current to isolate affirmation flow
+3. Identify where affirmation intent used to short-circuit add-item
+4. Restore behavior via:
+
+   * intent resolution
+   * parser routing
+   * WITHOUT controller conditionals
+5. Fix failing deterministic tests (if any)
+6. Only then resume live voice testing
 
 ---
 
-## 8. Plan Forward (Order Matters)
+## 9. Testing Rules
 
-1. **Stop further fixes to biryani / naan**
-2. Add `is_category` + `parent_id` to MenuSnapshot
-3. Update parser to detect category nodes structurally
-4. Route naan through `_handle_pending_disambiguation`
-5. Delete / disable `_handle_pending_nan_variant`
-6. Verify:
+* `pytest` must be green before live audio
+* Live testing is validation, not debugging
+* Logs to inspect:
 
-   * “2 biryani” → asks variant
-   * “2 garlic naan” → skips disambiguation
-7. Run pytest
-8. Only then resume live audio testing
+  * `STT_RESULT`
+  * parser route
+  * state transitions (`pending_*`)
 
 ---
 
-## 9. Guardrails for All Future PRs
+## 🔁 Resume Prompt for New Chat
 
-* ❌ No food names in controller logic
-* ❌ No new slot handlers per item
-* ✅ Menu metadata defines structure
-* ✅ Parser emits intent, controller orchestrates state
-* ✅ Deterministic first, LLM last
-
-Violations block merge.
-
----
-
-## 10. Resume Instructions (Next Chat)
-
-Start the next chat with:
+Use **exactly** this:
 
 > “We are continuing Voxeron Voice Agent RC1-4.
-> Category Heads are approved.
-> Naan-only logic is deprecated.
-> MenuSnapshot must define category vs leaf.
-> First step: verify git status and implement category metadata.”
-
-This document is **canonical** for RC1-4 decisions.
-
-````
+> RC3 is closed and stable.
+> Category-head disambiguation is implemented and working.
+> There is a regression in affirmation + item (‘doe maar de chicken’).
+> First step: ask me for `git status -sb`, then diff against `rc3-closed-2026-01-09`.
+> Do not re-explain architecture or add features.”
 
 ---
 
-### What I recommend you do now
+If you want, in the **next chat** I can:
 
-1. Save this as `docs/PROJECT_UPDATE_RC1-4.md`
-2. Commit it **alone** (documentation-only commit)
-3. In the next chat, paste:
-   ```bash
-   cat docs/PROJECT_UPDATE_RC1-4.md
-````
+* do a surgical RC3→RC1-4 diff
+* reconstruct the lost affirmation intent path
+* or help you fully delete remaining naan-specific legacy logic
 
-
+Just start the new chat with the resume prompt above.
