@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -564,38 +565,6 @@ def _extract_nan_variant_keyword_scoped(text: str) -> Optional[str]:
 
     return None
 
-def _emit_lifecycle(self, reason: str) -> None:
-    """
-    S1-4A: lifecycle instrumentation (fire-and-forget).
-    Must never affect runtime behavior.
-    """
-    try:
-        if not hasattr(self, "_telemetry") or not hasattr(self._telemetry, "emit_reason_only"):
-            return
-
-        st = self.state
-        sid = (
-            getattr(st, "session_id", None)
-            or getattr(st, "session_uuid", None)
-            or getattr(st, "ws_id", None)
-            or "unknown"
-        )
-        tctx = TelemetryContext(
-            session_id=str(sid),
-            tenant_id=str(getattr(st, "tenant_ref", "unknown")),
-            domain=str(getattr(st, "tenant_ref", "unknown")),
-        )
-
-        self._telemetry.emit_reason_only(
-            ctx=tctx,
-            utterance="",
-            parser_status="LIFECYCLE",
-            parser_reason=str(reason),
-            execution_time_ms=0.0,
-            confidence=0.0,
-      )
-    except Exception:
-        pass
 
 class SessionController:
     def __init__(
@@ -637,6 +606,72 @@ class SessionController:
         self.tts_end = tts_end
         self._telemetry = get_telemetry_emitter()
 
+    def _emit_lifecycle(self, reason: str) -> None:
+        """
+        S1-4A: lifecycle instrumentation (fire-and-forget).
+        Must never affect runtime behavior.
+        """
+        try:
+            if not hasattr(self, "_telemetry"):
+                logger.warning("S1-4A lifecycle: _telemetry missing, skipping")
+                return
+            if not hasattr(self._telemetry, "emit_reason_only"):
+                logger.warning("S1-4A lifecycle: emit_reason_only missing, skipping")
+                return
+
+            st = self.state
+            sid = (
+                getattr(st, "session_id", None)
+                or getattr(st, "session_uuid", None)
+                or getattr(st, "ws_id", None)
+                or "unknown"
+            )
+            tctx = TelemetryContext(
+                session_id=str(sid),
+                tenant_id=str(getattr(st, "tenant_ref", "unknown")),
+                domain=str(getattr(st, "tenant_ref", "unknown")),
+            )
+
+            # Fire-and-forget lifecycle marker (through emitter)
+            self._telemetry.emit_reason_only(
+                ctx=tctx,
+                utterance="",
+                parser_status="LIFECYCLE",
+                parser_reason=str(reason),
+                execution_time_ms=0.0,
+                confidence=0.0,
+            )
+
+            # S1-4A audit: optional direct insert to prove telemetry plumbing.
+            # Enabled only when TELEMETRY_SYNC_LIFECYCLE=1 (best-effort, never blocks).
+            import os
+            if os.getenv("TELEMETRY_SYNC_LIFECYCLE", "0").strip().lower() in ("1", "true"):
+                try:
+                    import asyncio
+                    from datetime import datetime, timezone
+                    from src.api.telemetry.emitter import TelemetryEvent
+                    from src.api.telemetry.insert_asyncpg import insert_telemetry_event
+
+                    evt = TelemetryEvent(
+                        ts=datetime.now(timezone.utc),
+                        session_id=tctx.session_id,
+                        tenant_id=tctx.tenant_id,
+                        domain=tctx.domain,
+                        parser_status="LIFECYCLE",
+                        parser_reason=str(reason),
+                        utterance_redacted="",
+                        pii_redacted=True,
+                        truncation=False,
+                        execution_time_ms=0.0,
+                        confidence=0.0,
+                    )
+                    asyncio.get_running_loop().create_task(insert_telemetry_event(evt))
+                except Exception:
+                    pass
+
+        except Exception:
+            logger.warning("S1-4A lifecycle emit failed", exc_info=True)
+            
     # -------------------------
     # UX strings
     # -------------------------
@@ -1160,6 +1195,23 @@ class SessionController:
 
         orch = CognitiveOrchestrator(alias_map=alias_map, menu=menu, telemetry=self._telemetry)
         decision = orch.decide(transcript, telemetry_ctx=ctx)
+        
+        # S1-4A: parser resolution telemetry (one per user turn, deterministic path)
+        try:
+            if hasattr(self, "_telemetry") and hasattr(self._telemetry, "emit_reason_only"):
+                tctx = ctx
+                pr = getattr(decision, "parser_result", None)
+                self._telemetry.emit_reason_only(
+                    ctx=tctx,
+                    utterance=transcript or "",
+                    parser_status=str(getattr(getattr(pr, "status", None), "value", getattr(pr, "status", "UNKNOWN"))),
+                    parser_reason=str(getattr(getattr(pr, "reason_code", None), "value", getattr(pr, "reason_code", "UNKNOWN"))),
+                    execution_time_ms=float(getattr(pr, "execution_time_ms", 0.0) or 0.0),
+                    confidence=float(getattr(pr, "confidence", 0.0) or 0.0),
+                )
+        except Exception:
+            if os.getenv("TELEMETRY_AUDIT_PROBE", "0") == "1":
+                logger.warning("telemetry: orchestrator match emit failed", exc_info=True)
 
         if decision.route != OrchestratorRoute.DETERMINISTIC:
             return None
@@ -1211,6 +1263,23 @@ class SessionController:
 
         orch = CognitiveOrchestrator(alias_map=alias_map, menu=menu, telemetry=self._telemetry)
         decision = orch.decide(transcript, telemetry_ctx=ctx)
+
+        # S1-4A: parser resolution telemetry (one per user turn, deterministic path)
+        try:
+            if hasattr(self, "_telemetry") and hasattr(self._telemetry, "emit_reason_only"):
+                tctx = ctx
+                pr = getattr(decision, "parser_result", None)
+                self._telemetry.emit_reason_only(
+                    ctx=tctx,
+                    utterance=transcript or "",
+                    parser_status=str(getattr(getattr(pr, "status", None), "value", getattr(pr, "status", "UNKNOWN"))),
+                    parser_reason=str(getattr(getattr(pr, "reason_code", None), "value", getattr(pr, "reason_code", "UNKNOWN"))),
+                    execution_time_ms=float(getattr(pr, "execution_time_ms", 0.0) or 0.0),
+                    confidence=float(getattr(pr, "confidence", 0.0) or 0.0),
+                )
+        except Exception:
+            if os.getenv("TELEMETRY_AUDIT_PROBE", "0") == "1":
+                logger.warning("telemetry: orchestrator qty emit failed", exc_info=True)
 
         if decision.route != OrchestratorRoute.DETERMINISTIC:
             return None
@@ -1901,6 +1970,32 @@ class SessionController:
 
             logger.info("STT: %s", display_transcript)
             await self.send_user_text(ws, display_transcript)
+            # S1-4A audit probe: prove telemetry writes on hot-path (optional, env-guarded)
+            try:
+                import os
+                if os.getenv("TELEMETRY_AUDIT_PROBE", "0").strip().lower() in ("1", "true"):
+                    from datetime import datetime, timezone
+                    import asyncio
+                    from src.api.telemetry.emitter import TelemetryEvent
+                    from src.api.telemetry.insert_asyncpg import insert_telemetry_event
+
+                    tctx = self._telemetry_ctx()
+                    evt = TelemetryEvent(
+                        ts=datetime.now(timezone.utc),
+                        session_id=tctx.session_id,
+                        tenant_id=tctx.tenant_id,
+                        domain=tctx.domain,
+                        parser_status="AUDIT",
+                        parser_reason="HOTPATH_PROBE",
+                        utterance_redacted=display_transcript or "",
+                        pii_redacted=True,
+                        truncation=False,
+                        execution_time_ms=0.0,
+                        confidence=0.0,
+                    )
+                    asyncio.get_running_loop().create_task(insert_telemetry_event(evt))
+            except Exception:
+                pass
 
             tnorm = " " + norm_simple(transcript) + " "
 
@@ -2663,20 +2758,16 @@ class SessionController:
                             else f"We hebben {opts}. Welke {st.pending_disambiguation.parent_label} wil je?",
                         )
                         return
-
+                
                 # Optional orchestrator for very short/ambiguous leaf-only utterances
                 orch_id = await self._maybe_orchestrator_match_item(
                     ws, st.menu, transcript, qty=effective_qty
                 )
-                if orch_id:
-                    st.order.add(orch_id, max(1, int(effective_qty or 1)))
-                    added_any = True
-                    added_ids.append(orch_id)
 
                 # Standard deterministic matcher (leaf items only)
                 if not added_any:
                     adds = parse_add_item(st.menu, transcript, qty=effective_qty)
-
+                    
                 # RC3: suppress implicit re-adds when user merely repeats an item name
                 # (e.g., "Lamb Karahi" during spice/fulfillment/name phases).
                 # Only suppress if:
@@ -2689,6 +2780,41 @@ class SessionController:
                     if isinstance(getattr(st.order, "items", None), dict) and (st.order.items.get(_iid, 0) or 0) > 0:
                         logger.info("RC3: suppress implicit re-add on bare item mention: %s", _iid)
                         adds = []
+                # S1-4A telemetry: deterministic NO_MATCH -> LLM fallback (decision boundary)
+                try:
+                    if (
+                        st.menu
+                        and allow_deterministic_add
+                        and (not added_any)
+                        and (not adds)
+                        and (not st.pending_choice)
+                    ):
+                        tok = norm_simple(transcript).strip()
+                        # If it's qty-only, we will go to CLARIFY (handled below), not LLM fallback telemetry here.
+                        qtyish = tok in ("one", "two", "three", "1", "2", "3", "yes", "yeah", "ja", "sure")
+                        if not qtyish:
+                            if hasattr(self, "_telemetry") and hasattr(self._telemetry, "emit_reason_only"):
+                                sid_nm = (
+                                    getattr(st, "session_id", None)
+                                    or getattr(st, "session_uuid", None)
+                                    or getattr(st, "ws_id", None)
+                                    or "unknown"
+                                )
+                                self._telemetry.emit_reason_only(
+                                    ctx=TelemetryContext(
+                                        session_id=str(sid_nm),
+                                        tenant_id=str(getattr(st, "tenant_ref", "unknown")),
+                                        domain=str(getattr(st, "tenant_ref", "unknown")),
+                                    ),
+                                    utterance=(transcript or ""),
+                                    parser_status="NO_MATCH",
+                                    parser_reason="DETERMINISTIC_NO_MATCH_FALLBACK_TO_LLM",
+                                    execution_time_ms=0.0,
+                                    confidence=0.0,
+                                )
+                except Exception:
+                    # telemetry must never affect control flow
+                    pass
 
                 # Naan detection (generic + explicit mentions)
                 # --- RC3: handle split edits like "one plain naan and one garlic naan" deterministically ---
@@ -2892,9 +3018,33 @@ class SessionController:
             if st.menu and (not added_any) and qty and (not adds) and (not st.pending_choice):
                 # Heuristic: quantity / acknowledgement without a dish
                 tok = norm_simple(transcript).strip()
-                if tok in ("one", "two", "three", "1", "2", "3", "yes", "yeah", "ja", "sure"):
+                if tok in ("one", "two", "three", "1", "2", "3", "een", "één", "twee", "drie", "yes", "yeah", "ja", "sure"):
                     st.pending_qty_hold = int(qty)
                     st.pending_qty_deadline = now_ts + 6.0
+                    # S1-4A telemetry: qty-only -> CLARIFY (decision boundary)
+                    try:
+                        if hasattr(self, "_telemetry") and hasattr(self._telemetry, "emit_reason_only"):
+                            sid_q = (
+                                getattr(st, "session_id", None)
+                                or getattr(st, "session_uuid", None)
+                                or getattr(st, "ws_id", None)
+                                or "unknown"
+                            )
+                            self._telemetry.emit_reason_only(
+                                ctx=TelemetryContext(
+                                    session_id=str(sid_q),
+                                    tenant_id=str(getattr(st, "tenant_ref", "unknown")),
+                                    domain=str(getattr(st, "tenant_ref", "unknown")),
+                                ),
+                                utterance=(transcript or ""),
+                                parser_status="CLARIFY",
+                                parser_reason="QTY_HOLD_NO_ITEM",
+                                execution_time_ms=0.0,
+                                confidence=0.0,
+                            )
+                    except Exception:
+                        pass
+
                     await self.clear_thinking(ws)
                     await self._speak(ws, "Sure, which item would you like to add?")
                     return
@@ -2993,6 +3143,19 @@ class SessionController:
             if st.menu:
                 default_items = [st.menu.display_name(iid) for _, iid in st.menu.name_choices[:80]]
                 menu_context = "\n".join([f"- {x}" for x in default_items]) if default_items else "Menu empty."
+            # S1-4A: LLM usage boundary telemetry (fallback used)
+            try:
+                if hasattr(self, "_telemetry") and hasattr(self._telemetry, "emit_reason_only"):
+                    self._telemetry.emit_reason_only(
+                        ctx=self._telemetry_ctx(),
+                        utterance=transcript or "",
+                        parser_status="LLM",
+                        parser_reason="LLM_FALLBACK_USED",
+                        execution_time_ms=0.0,
+                        confidence=0.0,
+                    )
+            except Exception:
+                pass
 
             out = await llm_turn(self.oa, st, transcript, menu_context)
             reply = (out.get("reply") or "").strip()

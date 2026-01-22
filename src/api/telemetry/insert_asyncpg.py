@@ -87,5 +87,9 @@ async def insert_telemetry_event(evt: TelemetryEvent) -> None:
                 evt.confidence,
             )
     except Exception:
+        if os.getenv("TELEMETRY_AUDIT_PROBE", "0") == "1":
+            logger.warning("telemetry: insert failed (AUDIT_PROBE)", exc_info=True)
+            raise
         logger.debug("telemetry: insert failed", exc_info=True)
+
 

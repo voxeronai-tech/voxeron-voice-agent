@@ -34,38 +34,43 @@ class TelemetryEvent:
     parser_reason: str
     utterance_redacted: str
     pii_redacted: bool
-    truncation: str
+    truncation: bool  # IMPORTANT: matches DB column type (boolean)
     execution_time_ms: float
     confidence: float
 
 
-def _head_tail_100(s: str) -> Tuple[str, str, bool]:
+def _head_tail_100(s: str) -> Tuple[str, bool]:
     s = (s or "").strip()
     if len(s) <= MAX_UTTERANCE:
-        return s, "NONE", False
+        return s, False
 
     head = s[:48]
     tail = s[-48:]
     out = f"{head} … {tail}"
     out = out[:MAX_UTTERANCE]
-    return out, "HEAD_TAIL_48_48", True
+    return out, True
 
 
-def redact_pii_mvp(text: str) -> Tuple[str, bool, str]:
+def redact_pii_mvp(text: str) -> Tuple[str, bool, bool]:
+    """
+    Returns:
+      - redacted_text
+      - pii_redacted (bool): whether we changed text due to PII masking
+      - truncated (bool): whether we truncated to head/tail
+    """
     raw = (text or "").strip()
     if not raw:
-        return "", False, "NONE"
+        return "", False, False
 
     red = raw
     red = _EMAIL_RE.sub("[REDACTED_EMAIL]", red)
     red = _PHONE_RE.sub("[REDACTED_PHONE]", red)
     red = _LONG_NUM_RE.sub("[REDACTED_NUM]", red)
 
-    changed = (red != raw)
-    red2, trunc, trunc_changed = _head_tail_100(red)
-    changed = changed or trunc_changed
+    pii_changed = (red != raw)
+    red2, truncated = _head_tail_100(red)
 
-    return red2, changed, trunc
+    return red2, bool(pii_changed), bool(truncated)
 
 
 InsertFn = Callable[[TelemetryEvent], Awaitable[None]]
@@ -117,7 +122,7 @@ class TelemetryEmitter:
             return
 
         try:
-            utter_red, pii_redacted, trunc = redact_pii_mvp(utterance)
+            utter_red, pii_redacted, truncated = redact_pii_mvp(utterance)
 
             evt = TelemetryEvent(
                 ts=datetime.now(timezone.utc),
@@ -128,14 +133,14 @@ class TelemetryEmitter:
                 parser_reason=str(getattr(getattr(parser_result, "reason_code", None), "value", "UNKNOWN")),
                 utterance_redacted=utter_red,
                 pii_redacted=bool(pii_redacted),
-                truncation=str(trunc),
+                truncation=bool(truncated),  # ✅ boolean
                 execution_time_ms=float(getattr(parser_result, "execution_time_ms", 0.0) or 0.0),
                 confidence=float(getattr(parser_result, "confidence", 0.0) or 0.0),
             )
             loop.create_task(self._insert_with_timeout(evt))
         except Exception:
             logger.debug("telemetry: failed to schedule emit", exc_info=True)
-            
+
     def emit_reason_only(
         self,
         *,
@@ -148,12 +153,15 @@ class TelemetryEmitter:
     ) -> None:
         if not self._enabled:
             return
+
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
+
         try:
-            utter_red, pii_redacted, trunc = redact_pii_mvp(utterance)
+            utter_red, pii_redacted, truncated = redact_pii_mvp(utterance)
+
             evt = TelemetryEvent(
                 ts=datetime.now(timezone.utc),
                 session_id=ctx.session_id,
@@ -162,8 +170,8 @@ class TelemetryEmitter:
                 parser_status=str(parser_status),
                 parser_reason=str(parser_reason),
                 utterance_redacted=utter_red,
-                pii_redacted=pii_redacted,
-                truncation=trunc,
+                pii_redacted=bool(pii_redacted),
+                truncation=bool(truncated),  # ✅ boolean
                 execution_time_ms=float(execution_time_ms or 0.0),
                 confidence=float(confidence or 0.0),
             )
