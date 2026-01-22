@@ -2731,6 +2731,9 @@ class SessionController:
                 effective_qty = st.pending_qty_hold
                 st.pending_qty_hold = None
                 st.pending_qty_deadline = 0.0
+            elif st.pending_qty_hold and now_ts >= st.pending_qty_deadline:
+                st.pending_qty_hold = None
+                st.pending_qty_deadline = 0.0
 
             # Only run add/slot logic if we have a menu snapshot
             adds: List[Tuple[str, int]] = []
@@ -2791,7 +2794,7 @@ class SessionController:
                     ):
                         tok = norm_simple(transcript).strip()
                         # If it's qty-only, we will go to CLARIFY (handled below), not LLM fallback telemetry here.
-                        qtyish = tok in ("one", "two", "three", "1", "2", "3", "yes", "yeah", "ja", "sure")
+                        qtyish = tok in ("one","two","three","1","2","3","een","één","twee","drie","yes","yeah","ja","sure")
                         if not qtyish:
                             if hasattr(self, "_telemetry") and hasattr(self._telemetry, "emit_reason_only"):
                                 sid_nm = (
@@ -3020,35 +3023,11 @@ class SessionController:
                 tok = norm_simple(transcript).strip()
                 if tok in ("one", "two", "three", "1", "2", "3", "een", "één", "twee", "drie", "yes", "yeah", "ja", "sure"):
                     st.pending_qty_hold = int(qty)
-                    st.pending_qty_deadline = now_ts + 6.0
-                    # S1-4A telemetry: qty-only -> CLARIFY (decision boundary)
-                    try:
-                        if hasattr(self, "_telemetry") and hasattr(self._telemetry, "emit_reason_only"):
-                            sid_q = (
-                                getattr(st, "session_id", None)
-                                or getattr(st, "session_uuid", None)
-                                or getattr(st, "ws_id", None)
-                                or "unknown"
-                            )
-                            self._telemetry.emit_reason_only(
-                                ctx=TelemetryContext(
-                                    session_id=str(sid_q),
-                                    tenant_id=str(getattr(st, "tenant_ref", "unknown")),
-                                    domain=str(getattr(st, "tenant_ref", "unknown")),
-                                ),
-                                utterance=(transcript or ""),
-                                parser_status="CLARIFY",
-                                parser_reason="QTY_HOLD_NO_ITEM",
-                                execution_time_ms=0.0,
-                                confidence=0.0,
-                            )
-                    except Exception:
-                        pass
-
+                    # Hold briefly to allow split utterances like: "two ... [pause] ... naan"
+                    st.pending_qty_deadline = now_ts + 2.0
                     await self.clear_thinking(ws)
-                    await self._speak(ws, "Sure, which item would you like to add?")
                     return
-
+                
             # If cart changed, advance to fulfillment/name/anything-else prompts (deterministic)
             # RC3: store last-added delta so the user can correct immediately ("No, I meant X")
             if st.menu and added_any:
