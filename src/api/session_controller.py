@@ -647,7 +647,6 @@ class SessionController:
             import os
             if os.getenv("TELEMETRY_SYNC_LIFECYCLE", "0").strip().lower() in ("1", "true"):
                 try:
-                    import asyncio
                     from datetime import datetime, timezone
                     from src.api.telemetry.emitter import TelemetryEvent
                     from src.api.telemetry.insert_asyncpg import insert_telemetry_event
@@ -1771,18 +1770,49 @@ class SessionController:
             if st.tenant_ref == "taj_mahal" and st.lang == "en" and transcript:
                 t_norm_chk = " " + norm_simple(transcript) + " "
                 dutch_hits = [
-                    " in plaats van ", " kan ik ", " ik wil ", " graag ", " bestelling ", " afhalen ",
-                    " bezorgen ", " prijs ", " totaal ", " twee ", " een ",
+                    " in plaats van ", " kan ik ", " ik wil ", " graag ",
+                    " bestelling ", " bestellen ",  # include verb form too
+                    " afhalen ", " bezorgen ", " prijs ", " totaal ",
+                    " twee ", " een ",
                 ]
                 if sum(1 for k in dutch_hits if k in t_norm_chk) >= 2:
                     try:
                         retry = await self.oa.transcribe_pcm(pcm, "en", prompt=None)
                         retry = (retry or "").strip()
                         if retry:
-                            logger.info("RC3: STT dutch-bleed retry en_locked: before=%r after=%r", transcript, retry)
+                            logger.info(
+                                "RC3: STT dutch-bleed retry en_locked: before=%r after=%r",
+                                transcript,
+                                retry,
+                            )
                             transcript = retry
                     except Exception:
                         pass
+
+            # RC: silent hold for split utterances like "I want two ... [pause] ... butter chicken"
+            # Prevents barge-in when user hasn't finished the sentence.
+            try:
+                toks = (norm_simple(transcript) or "").split()
+                if len(toks) in (3, 4):
+                    # examples: "i want two", "i would like two", "can i have two"
+                    prefix_ok = (
+                        toks[:2] == ["i", "want"]
+                        or toks[:3] == ["i", "would", "like"]
+                        or toks[:3] == ["can", "i", "have"]
+                    )
+                    qty_map = {
+                        "one": 1, "two": 2, "three": 3,
+                        "1": 1, "2": 2, "3": 3,
+                        "een": 1, "één": 1, "twee": 2, "drie": 3,
+                    }
+                    last = toks[-1] if toks else ""
+                    if prefix_ok and last in qty_map:
+                        st.pending_qty_hold = int(qty_map[last])
+                        st.pending_qty_deadline = now_ts + 3.0  # continuation window
+                        await self.clear_thinking(ws)
+                        return
+            except Exception:
+                pass
 
             # RC3: merge short incomplete prefixes like "I'd like ..." across a brief pause
             if getattr(st, "pending_prefix", None) and now_ts < float(getattr(st, "pending_prefix_deadline", 0.0) or 0.0):
@@ -1797,7 +1827,7 @@ class SessionController:
                 await self.clear_thinking(ws)
                 return
 
-            # Optima-style cart check confirmation
+            # Google Conversation-style cart check confirmation
             if getattr(st, "pending_cart_check", False):
                 # Retry cap: never get stuck in confirmation loops if STT returns empty/unclear.
                 retries = int(getattr(st, "cart_check_retries", 0) or 0)
@@ -1975,7 +2005,6 @@ class SessionController:
                 import os
                 if os.getenv("TELEMETRY_AUDIT_PROBE", "0").strip().lower() in ("1", "true"):
                     from datetime import datetime, timezone
-                    import asyncio
                     from src.api.telemetry.emitter import TelemetryEvent
                     from src.api.telemetry.insert_asyncpg import insert_telemetry_event
 
