@@ -2780,6 +2780,44 @@ class SessionController:
                     )
 
                     if payload:
+                        # FIX: do not drop other resolvable leaf items in the same utterance.
+                        # Add all deterministic leaf hits first, EXCEPT anything belonging to the ambiguous parent head.
+                        try:
+                            parent = norm_simple(str(payload.get("parent_label") or "")).strip()
+                            pre_adds = parse_add_item(st.menu, transcript, qty=effective_qty) if st.menu else []
+                            kept: List[Tuple[str, int]] = []
+
+                            for iid, q in (pre_adds or []):
+                                # Skip items that belong to the ambiguous head (e.g., any "* biryani *" leaf).
+                                label = ""
+                                try:
+                                    mi = (getattr(st.menu, "items", None) or {}).get(iid) if st.menu else None
+                                    # Be defensive about menu item shape
+                                    label = (
+                                        getattr(mi, "label", None)
+                                        or getattr(mi, "name", None)
+                                        or getattr(mi, "title", None)
+                                        or str(mi or "")
+                                    )
+                                except Exception:
+                                    label = ""
+
+                                label_n = " " + norm_simple(label) + " "
+                                if parent and (f" {parent} " in label_n):
+                                    continue
+
+                                kept.append((iid, int(q or 1)))
+
+                            if kept:
+                                # Apply quietly; we are about to ask a disambiguation question for the remaining head item.
+                                for iid, q in kept:
+                                    st.order.add(iid, max(1, int(q)))
+                                st.last_added = kept
+
+                        except Exception:
+                            # Never allow this pre-add path to affect control flow
+                            pass
+
                         st.pending_disambiguation = DisambiguationContext.from_dict(payload)
                         await self.clear_thinking(ws)
                         opts = ", ".join(st.pending_disambiguation.options or [])
@@ -2790,7 +2828,7 @@ class SessionController:
                             else f"We hebben {opts}. Welke {st.pending_disambiguation.parent_label} wil je?",
                         )
                         return
-                
+
                 # Optional orchestrator for very short/ambiguous leaf-only utterances
                 orch_id = await self._maybe_orchestrator_match_item(
                     ws, st.menu, transcript, qty=effective_qty
