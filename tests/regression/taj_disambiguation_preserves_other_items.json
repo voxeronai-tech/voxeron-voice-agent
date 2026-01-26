@@ -1,0 +1,14 @@
+{
+  "tenant_ref": "taj_mahal",
+  "init": {},
+  "turns": [
+    { "user": "two butter chicken and two biryani" },
+    { "user": "lamb" }
+  ],
+  "expect": {
+    "items": {
+      "butter_chicken": 2,
+      "lamb_biryani": 2
+    }
+  }
+}
