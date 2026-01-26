@@ -924,6 +924,7 @@ class SessionController:
                     "options": opt_list,
                     "qty": int(q or 1),
                     "original_intent": "ADD_ITEM",
+                    "head_segment": seg_raw,  # <-- the segment that contained the ambiguous head
                 }
 
         return None
@@ -2781,38 +2782,32 @@ class SessionController:
 
                     if payload:
                         # FIX: do not drop other resolvable leaf items in the same utterance.
-                        # Add all deterministic leaf hits first, EXCEPT anything belonging to the ambiguous parent head.
+                        # Add deterministic leaf hits from segments OTHER than the head segment that triggered disambiguation.
+                        pre_added: List[Tuple[str, int]] = []
                         try:
-                            parent = norm_simple(str(payload.get("parent_label") or "")).strip()
-                            pre_adds = parse_add_item(st.menu, transcript, qty=effective_qty) if st.menu else []
-                            kept: List[Tuple[str, int]] = []
+                            head_seg_norm = norm_simple(str(payload.get("head_segment") or "")).strip()
 
-                            for iid, q in (pre_adds or []):
-                                # Skip items that belong to the ambiguous head (e.g., any "* biryani *" leaf).
-                                label = ""
-                                try:
-                                    mi = (getattr(st.menu, "items", None) or {}).get(iid) if st.menu else None
-                                    # Be defensive about menu item shape
-                                    label = (
-                                        getattr(mi, "label", None)
-                                        or getattr(mi, "name", None)
-                                        or getattr(mi, "title", None)
-                                        or str(mi or "")
-                                    )
-                                except Exception:
-                                    label = ""
+                            raw_parts = re.split(r"\b(?:and|en)\b|[,;]", transcript or "", flags=re.IGNORECASE)
+                            raw_parts = [p.strip(" ,.!?") for p in raw_parts if (p or "").strip()]
 
-                                label_n = " " + norm_simple(label) + " "
-                                if parent and (f" {parent} " in label_n):
+                            for seg in raw_parts:
+                                seg_norm = norm_simple(seg).strip()
+                                if not seg_norm:
+                                    continue
+                                if head_seg_norm and seg_norm == head_seg_norm:
                                     continue
 
-                                kept.append((iid, int(q or 1)))
+                                seg_adds = parse_add_item(st.menu, seg, qty=effective_qty) if st.menu else []
+                                for iid, q in (seg_adds or []):
+                                    qn = max(1, int(q or 1))
+                                    st.order.add(iid, qn)
+                                    pre_added.append((iid, qn))
+                                    added_any = True
+                                    added_ids.append(iid)
 
-                            if kept:
-                                # Apply quietly; we are about to ask a disambiguation question for the remaining head item.
-                                for iid, q in kept:
-                                    st.order.add(iid, max(1, int(q)))
-                                st.last_added = kept
+                            if pre_added:
+                                st.last_added = pre_added
+                                st.last_added_ts = time.time()
 
                         except Exception:
                             # Never allow this pre-add path to affect control flow
