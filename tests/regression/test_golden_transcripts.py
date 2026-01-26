@@ -1,26 +1,41 @@
+# tests/regression/test_golden_transcripts.py
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
-import asyncio
+from tests.helpers.voice_simulator import (
+    GoldenConversation,
+    Turn,
+    run_golden,
+    FakeOpenAIClient,
+)
 
-from tests.helpers.voice_simulator import GoldenConversation, Turn, run_golden, FakeOpenAIClient
-
-from src.api.session_controller import SessionController
-from src.api.session_controller import SessionState
+from src.api.session_controller import SessionController, SessionState
+from tests.helpers.menu_fixtures import taj_minimal_menu_snapshot
 
 
 class DummyTenantManager:
+    """Golden tests run without tenant rules/config. Provide safe no-ops."""
+
     def load_tenant(self, tenant_ref: str):
         return None
 
-    # SessionController calls these if present; provide safe no-ops.
     def apply_aliases(self, tenant_cfg, transcript: str, lang: str):
         return transcript, []
 
     def strip_affirmation_prefix(self, tenant_cfg, transcript: str, lang: str):
         return transcript, False, None
+
+
+class FakeMenuStore:
+    """Deterministic menu snapshots for golden tests (no DB dependency)."""
+
+    async def get_snapshot(self, tenant_ref: str, lang: str = "en"):
+        if tenant_ref == "taj_mahal":
+            return taj_minimal_menu_snapshot(lang=lang)
+        return None
 
 
 async def _noop_async(*_args, **_kwargs):
@@ -31,7 +46,7 @@ def controller_factory(st: SessionState, oa: FakeOpenAIClient) -> SessionControl
     return SessionController(
         state=st,
         tenant_manager=DummyTenantManager(),
-        menu_store=None,
+        menu_store=FakeMenuStore(),
         oa=oa,
         tenant_rules_enabled=False,
         tenant_stt_prompt_enabled=False,
@@ -46,12 +61,13 @@ def controller_factory(st: SessionState, oa: FakeOpenAIClient) -> SessionControl
         tts_end=_noop_async,
     )
 
+
 def load_convs(p: Path) -> list[GoldenConversation]:
     obj = json.loads(p.read_text(encoding="utf-8"))
 
     # Case A: file contains a LIST of conversations
     if isinstance(obj, list):
-        convs = []
+        convs: list[GoldenConversation] = []
         for c in obj:
             turns = [Turn(user=t["user"]) for t in c["turns"]]
             convs.append(
@@ -75,13 +91,16 @@ def load_convs(p: Path) -> list[GoldenConversation]:
         )
     ]
 
+
 def test_golden_transcripts_smoke():
     asyncio.run(_test_golden_transcripts_smoke())
 
 
 async def _test_golden_transcripts_smoke():
     root = Path("tests/regression")
-    files = []
+    files: list[Path] = []
+
+    # Include JSON files that are either a dict with "turns" or a list of dicts with "turns"
     for p in sorted(root.glob("*.json")):
         obj = json.loads(p.read_text(encoding="utf-8"))
         if isinstance(obj, dict) and "turns" in obj:
@@ -95,20 +114,19 @@ async def _test_golden_transcripts_smoke():
         convs = load_convs(f)
         for conv in convs:
             out = await run_golden(conv=conv, controller_factory=controller_factory)
-            exp = conv.expect
+            exp = conv.expect or {}
 
-        if "pending_disambiguation" in exp:
-            assert out["pending_disambiguation"] == exp["pending_disambiguation"], f"{f}: pending_disambiguation"
+            if "pending_disambiguation" in exp:
+                assert out["pending_disambiguation"] == exp["pending_disambiguation"], f"{f}: pending_disambiguation"
 
-        if "order_finalized" in exp:
-            assert out["order_finalized"] == exp["order_finalized"], f"{f}: order_finalized"
+            if "order_finalized" in exp:
+                assert out["order_finalized"] == exp["order_finalized"], f"{f}: order_finalized"
 
-        if "customer_name" in exp:
-            assert (out.get("customer_name") or "") == (exp["customer_name"] or ""), f"{f}: customer_name"
+            if "customer_name" in exp:
+                assert (out.get("customer_name") or "") == (exp["customer_name"] or ""), f"{f}: customer_name"
 
-        if "items" in exp:
-            assert out["items"] == exp["items"], f"{f}: items"
+            if "items" in exp:
+                assert out["items"] == exp["items"], f"{f}: items"
 
-        if exp.get("items_nonempty"):
-            assert out["items"], f"{f}: expected items but cart is empty"
-
+            if exp.get("items_nonempty"):
+                assert out["items"], f"{f}: expected items but cart is empty"
