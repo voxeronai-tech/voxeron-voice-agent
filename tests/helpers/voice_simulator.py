@@ -5,7 +5,6 @@ from typing import Any, Callable, Dict, List, Optional
 
 from src.api.session_controller import SessionController, SessionState
 
-
 @dataclass(frozen=True)
 class Turn:
     user: str
@@ -37,7 +36,10 @@ class FakeOpenAIClient:
 
     async def transcribe_pcm(self, _pcm: bytes, _lang=None, prompt=None) -> str:
         if self._q:
-            return self._q.pop(0)
+            t = self._q.pop(0)
+            print("[FakeSTT] transcribe_pcm =>", repr(t))
+            return t
+        print("[FakeSTT] transcribe_pcm => <empty>")
         return ""
 
     def fast_yes_no(self, text: str):
@@ -77,8 +79,32 @@ async def run_golden(
     controller = controller_factory(st, oa)
     ws = FakeWebSocket()
 
-    for _ in conv.turns:
+    print("[CTX] tenant_cfg:", bool(st.tenant_cfg), "lang:", st.lang, "phase:", st.phase)
+
+    # Ensure tenant context (cfg + menu snapshot) is loaded in offline golden tests.
+    # In production this is done in the websocket lifecycle; here we do it explicitly.
+    await controller._load_tenant_context(st.tenant_ref)
+
+    print("[MENU] keys:", list((getattr(st.menu, "items_by_id", {}) or {}).keys()))
+    print("[MENU] amb:", getattr(st.menu, "ambiguity_options", None))
+    print("[MENU] alias butter:", (getattr(st.menu, "alias_map", {}) or {}).get("butter chicken"))
+
+    for i, _ in enumerate(conv.turns):
+        print(
+            f"[TURN {i}] BEFORE phase={st.phase} pending_fulfillment={st.pending_fulfillment} "
+            f"fulfillment_mode={st.fulfillment_mode} order={st.order.items}"
+        )
         await controller.process_utterance(ws, b"dummy-pcm")
+        print(
+            f"[TURN {i}] AFTER  phase={st.phase} pending_fulfillment={st.pending_fulfillment} "
+            f"fulfillment_mode={st.fulfillment_mode} order={st.order.items} "
+            f"pending_disambiguation={getattr(st,'pending_disambiguation',None)}"
+        )
+
+    print("WS sent_text:", ws.sent_text)
+    print("ORDER ITEMS:", st.order.items)
+    print("PENDING_DISAMBIG:", getattr(st, "pending_disambiguation", None))
+    print("MENU LOADED:", bool(getattr(st, "menu", None)))
 
     items = dict(getattr(getattr(st, "order", None), "items", {}) or {})
     pending_disambiguation = bool(getattr(st, "pending_disambiguation", None))
