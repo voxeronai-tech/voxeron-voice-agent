@@ -1,0 +1,20 @@
+{
+  "tenant_ref": "taj_mahal",
+  "init": {
+    "lang": "en",
+    "phase": "ordering",
+    "fulfillment_mode": "pickup",
+    "pending_fulfillment": false
+  },
+  "turns": [
+    { "user": "one butter chicken" },
+    { "user": "confirm order" },
+    { "user": "no wait" },
+    { "user": "two butter chicken" }
+  ],
+  "expect": {
+    "items": {
+      "butter_chicken": 3
+    }
+  }
+}
