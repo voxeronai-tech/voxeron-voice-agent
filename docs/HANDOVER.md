@@ -1,205 +1,129 @@
-# VOXERON – ACTIVE HANDOVER
+# VOXERON — ACTIVE HANDOVER (CANONICAL)
 
-Last updated: 2026-01-06
-Release target: **v0.7.3**
-Active milestone: **RC1-3 – Deterministic Parsing MVP**
-
----
-
-## 1. Repository state (canonical source of truth)
-
-- Repository: `voxeron-voice-agent`
-- Primary development branch: `feature/sprint-1-orchestrator-parser`
-- Last released stable tag: `v0.7.2-rc2-impl`
-- RC3 stabilization decision: SessionController reverted to known-good v12 implementation
-- RC1-3 start tag: v0.7.3-rc1-3-start
-
-Purpose of this file:
-> This document is the **single handover artifact** for continuing work in a new chat. Chat memory is not authoritative. Git + this file are.
+Last updated: 2026-01-27  
+Scope authority: docs/SCOPE.md
 
 ---
 
-## 2. Release roadmap – v0.7.3 (Sprint 1)
+## Canonical Context Rule (MANDATORY)
 
-### RC1-1 – ParserResult typed contract ✅ **DONE**
-**Goal**: Shared deterministic parser contract usable by orchestrator and session controller.
+Reality is defined by:
+- the current Git repository state (branch + HEAD)
+- committed documentation in this repository
 
-Delivered:
-- Canonical typed contract: `src/api/parser/types.py`
-- Backward-compatible re-export: `src/api/orchestrator/parser_types.py`
-- Enums:
-  - `ParserStatus` (MATCH / NO_MATCH / PARTIAL / AMBIGUOUS)
-  - `ReasonCode`
-- Fields include:
-  - `status`
-  - `reason_code`
-  - `matched_entity`
-  - `confidence`
-  - `execution_time_ms`
-- Unit tests:
-  - `tests/unit/test_parser_result.py`
+Chat memory, verbal agreements, and local notes are NOT authoritative.
 
-Acceptance:
-- Matches blueprint v0.7.1
-- `execution_time_ms` measured per invocation
-- Unit tests cover: MATCH / NO_MATCH / PARTIAL / AMBIGUOUS
+If it is not committed, it does not exist.
 
-Implementation references:
-- Branch: `fix/rc1-1-parserresult-contract`
-- Merged into main: commit `aeeb9d4`
+This file is the single operational handover document for continuing work.
 
 ---
 
-### RC1-2 – Deterministic-first flow in CognitiveOrchestrator ✅ DONE
-**Goal**: Parser must always run before any LLM call.
+## Repository and Status
 
-Rules:
-- Orchestrator invokes deterministic parser on every user turn
-- If `MATCH`: execute deterministically, **skip LLM entirely (0 tokens)**
-- If `NO_MATCH`: fall back to LLM within <50ms after parser completion
-- Audio streaming must remain stable (no resets / pops)
+- Repository: voxeron-voice-agent
+- Active branch: feature/S1-4-telemetry-emitter
+- Status: clean, pushed, tests green
 
-Acceptance:
-- Parser always invoked first
-- MATCH → deterministic path (LLM skipped)
-- NO_MATCH → LLM fallback only
-- Canonical ParserResult enforced
-- DeterministicParser aligned with confidence + timing
-- Verified via local runtime checks
+Verification commands:
+- git status -sb
+- pytest -q
 
 ---
 
-### RC1-3 – DeterministicParser MVP (alias + quantity) ✅ DONE
-**Goal**: Minimal deterministic parser that handles core ordering reliably.
+## Where We Are (Truth Summary)
 
-Capabilities:
-- Alias lookup via `MenuSnapshot` / DB
-- Quantity extraction (1–10, EN + NL)
+The deterministic core of Voxeron is stable and protected by regression tests.
 
-Examples:
-- "two garlic naan" → MATCH (item_id=garlic_naan, qty=2)
-- "make it one naan" → MATCH (update qty=1)
-- Unknown item → NO_MATCH (reason=NO_ALIAS)
+Completed and locked:
+- Deterministic-first execution model
+- Typed parser contract
+- Deterministic parser MVP (aliases and quantities)
+- SessionController stabilization (RC3)
+- Confirmation and refusal decision-loop hardening
+- Offline golden regression harness
 
-Delivered (branch fix/rc1-3-deterministic-parser-mvp):
+We are no longer building parsing capability or conversational logic.
 
-**Original scope (Issue #3)**  
-Implement a minimal deterministic parser with:
-- Alias lookup via `MenuSnapshot` / DB
-- Quantity extraction (1–10, EN + NL)
-- Canonical `ParserResult` output (MATCH / NO_MATCH / PARTIAL)
-
-**Acceptance criteria – ALL MET**
-- “two garlic naan” → MATCH (item_id + qty=2)
-- “make it one naan” → MATCH (SET_QTY = 1)
-- Unknown item → NO_MATCH (NO_ALIAS)
-- `pytest -q` green
-
-**Implementation (branch `fix/rc1-3-deterministic-parser-mvp`)**
-- Quantity extractor: `src/api/parser/quantity.py`
-- Deterministic alias + qty parser: `src/api/orchestrator/deterministic_parser.py`
-- Deterministic SET_QTY wiring before LLM fallback
-- Safety guards preventing payload dicts from entering cart
-- Taj phonetics fix (`naam → naan`)
-
-**Release anchors**
-- Start tag: `v0.7.3-rc1-3-start`
-- Completion tag: **`v0.7.3-rc1-3-complete`** ✅  
-  (tag exists locally and on origin)
-
-> 🔒 **RC1-3 is closed. No further changes are allowed on this scope.**
+We are finishing infrastructure-level observability.
 
 ---
 
-### Explicitly OUT OF SCOPE for RC1-3
+## Last Completed Milestone
 
-These issues are **not** to be worked on until RC1-3 is complete:
+### Decision Loop Hardening — Confirmation and Refusal Integrity
 
-- RC1-4 TelemetryEmitter (parser NO_MATCH telemetry)
-- RC1-5 Redis SessionState shadow write
-- RC1-6 WebSocket lifecycle cleanup
-- RC1-7 End-to-end deterministic vs fallback harness
+What was fixed:
+- Explicit refusal handling during confirmation (pending_confirm)
+- Refusal clears the latch and returns to ORDERING
+- No LLM fallback on refusal
+- No confirmation hallucination
 
----
-
-## 3. Post-RC1-3 work: RC3 Session Stability (ACTIVE)
-
-RC3 is **explicitly out of RC1-3 scope** and exists to stabilize
-real-world conversation behavior in the `SessionController`.
-
-### Active RC3 branch
-- Branch: `fix/rc3-closeout-session-stability`
-- Status: **WIP**
-- Type: behavioral stabilization only
-
-### Problems being addressed
-- Confirmation loops (“Please say yes or no” dead-ends)
-- Mixed affirm/negate utterances (“No, I want …”)
-- Language instability (accidental NL/DE token drift)
-- Over-eager clarification questions (e.g. naan variants when unambiguous)
-- Spurious LLM menu enumerations after NEGATE
-
-### Hard constraints for RC3
-- ❌ No parser changes
-- ❌ No orchestrator refactors
-- ❌ No new deterministic capabilities
-- ✅ SessionController logic only
-- ✅ Incremental, reviewable fixes only
-
-### Baseline rule
-- Known-good baseline: **SessionController v12**
-- RC3 changes are *surgical deltas*, not rewrites
+Regression protection:
+- B1 golden transcript  
+  tests/regression/taj_confirm_refusal_returns_to_ordering.json
 
 ---
 
-## 4. Branching & workflow rules (MANDATORY)
+## Active Sprint
 
-- One issue = one branch
-- One concern = one commit
-- No large file rewrites in chat
-- No scope invention
-- RC1-3 code must never be amended
+### S1-4B — Telemetry as Truth
 
-**Active branches**
-- `feature/sprint-1-orchestrator-parser` (integration)
-- `fix/rc1-3-deterministic-parser-mvp` (closed)
-- `fix/rc3-closeout-session-stability` (active)
+Goal:
+Make the Decision Loop auditable.
 
-**Commit message format**
-RC3: <concise behavioral fix>
+In scope:
+- Telemetry for parser NO_MATCH
+- Telemetry for confirmation requested
+- Telemetry for confirmation accepted
+- Telemetry for confirmation refused
+- Fire-and-forget, non-blocking emission
+- Privacy-safe (PII redaction MVP)
 
-yaml
-Copy code
+Out of scope:
+- Any behavior or logic changes
+- STT prompt tuning or persona work
+- UI, dashboards, or analytics pipelines
 
----
-
-## 5. Explicitly OUT OF SCOPE (until RC3 is closed)
-
-- RC1-4 TelemetryEmitter
-- RC1-5 Redis SessionState shadow writes
-- RC1-6 WebSocket lifecycle cleanup
-- RC1-7 Deterministic vs fallback E2E harness
-- Any new language detection logic
-- Any new intent parsing logic
+Canonical issue:
+- GitHub issue: S1-4 TelemetryEmitter — Decision Loop Telemetry
 
 ---
 
-## 6. How to continue in a NEW CHAT
+## How to Continue (MANDATORY FLOW)
 
-Do **not** re-explain history manually.
+1. Work only on the active S1-4 telemetry issue
+2. Do not modify decision logic or behavior
+3. Wire telemetry at decision points in SessionController
+4. Keep commits small and reviewable
+5. Golden regressions must remain green at all times
 
-### Step 1 – Local context
-```bash
-git clone https://github.com/voxeronai-tech/voxeron-voice-agent.git
-cd voxeron-voice-agent
-git checkout feature/sprint-1-orchestrator-parser
-cat docs/HANDOVER.md
-git tag --list | grep v0.7.3
 ---
 
-## 7. Engineering principle (non-negotiable)
+## Verification
 
-> If it is not committed to Git, it does not exist.
+Required:
+- pytest -q
+- pytest -q tests/regression/test_golden_transcripts.py
+
+Telemetry must never block runtime execution.
+
+---
+
+## Architectural Guardrails (NON-NEGOTIABLE)
+
+- Deterministic first, LLM last
+- No tenant-specific logic in SessionController
+- No domain knowledge embedded in controller conditionals
+- Domain intelligence lives in MenuSnapshot, metadata, and tenant configuration
+- Offline golden tests must run without database or network access
+- One RC issue per branch
+- One behavioral change per commit
+
+---
+
+## Engineering Principle (Final)
+
+If it is not committed to Git, it does not exist.
 
 Chats are execution tools, not memory.
-
