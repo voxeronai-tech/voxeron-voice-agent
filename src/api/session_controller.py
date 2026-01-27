@@ -755,6 +755,36 @@ class SessionController:
             " ja ", " jazeker ", " zeker ", " oké ", " oke ", " prima ", " graag ", "top","toppie", "okidoki"
         ]
         return any(y in t for y in yes)
+    
+    def _is_refusal_like(self, text: str) -> bool:
+        """
+        Detect explicit user rejection/correction while pending_confirm is active.
+        This must be conservative, deterministic, and bilingual (EN/NL).
+        """
+        t_raw = (text or "").strip()
+        if not t_raw:
+            return False
+
+        # Use same normalization style as elsewhere in the controller
+        try:
+            t = " " + norm_simple(t_raw) + " "
+        except Exception:
+            t = " " + t_raw.lower().strip() + " "
+
+        # Strong refusal tokens, keep it conservative (word-boundary style via padding)
+        refusal_phrases = [
+            # EN
+            " no ", " nope ", " nah ",
+            " that's incorrect ", " that is incorrect ",
+            " wrong ", " not correct ",
+            " no wait ", " wait ",
+            # NL
+            " nee ", " nee hoor ",
+            " klopt niet ", " dat klopt niet ",
+            " onjuist ", " fout ",
+            " nee wacht ", " wacht ",
+        ]
+        return any(p in t for p in refusal_phrases)
 
     def _is_total_amount_query(self, text: str) -> bool:
         t = " " + norm_simple(text) + " "
@@ -2293,12 +2323,53 @@ class SessionController:
             # ==========================================================
             if st.order_finalized:
                 # Order already confirmed, keep it simple.
+                msg = "Your order is already confirmed. If you'd like to add something, just tell me." if st.lang != "nl" else "Je bestelling is al bevestigd. Als je nog iets wilt toevoegen, zeg het maar."
                 await self.clear_thinking(ws)
-                await self._speak(ws, "Your order is already confirmed. Anything else you'd like to add?")
+                await self._speak(ws, msg)
                 return
 
             if st.pending_confirm:
                 await self.clear_thinking(ws)
+
+                # 1) Refusal gate, must run before yes-like handling to prevent loops and LLM leakage
+                if self._is_refusal_like(transcript):
+                    st.pending_confirm = False
+
+                    # Best-effort phase reset, only if the field exists
+                    if hasattr(st, "phase"):
+                        try:
+                            st.phase = "ORDERING"
+                        except Exception:
+                            pass
+
+                    # Telemetry hook, defensive, only if a telemetry emitter exists on this controller
+                    try:
+                        tel = getattr(self, "telemetry", None)
+                        if tel:
+                            if hasattr(tel, "emit"):
+                                tel.emit(
+                                    event="REJECT",
+                                    reason="CONFIRMATION_REFUSED_BY_USER",
+                                    meta={"lang": getattr(st, "lang", None)},
+                                )
+                            elif hasattr(tel, "emit_event"):
+                                tel.emit_event(
+                                    "REJECT",
+                                    reason="CONFIRMATION_REFUSED_BY_USER",
+                                    meta={"lang": getattr(st, "lang", None)},
+                                )
+                    except Exception:
+                        pass
+
+                    await self._speak(
+                        ws,
+                        "Okay, no problem. What would you like to change or add?"
+                        if st.lang != "nl"
+                        else "Oké, geen probleem. Wat wil je aanpassen of toevoegen?",
+                    )
+                    return
+
+                # 2) Confirmation accept
                 if self._is_yes_like(transcript) or self._is_order_complete_intent(transcript):
                     st.pending_confirm = False
                     st.order_finalized = True
@@ -2306,25 +2377,25 @@ class SessionController:
                     mode_part = st.fulfillment_mode or "pickup"
                     cart = st.order.summary(st.menu) if st.menu else ""
                     if st.lang != "nl":
-                        await self._speak(ws, f"Perfect. Your {mode_part} order{name_part} is confirmed. {('Order: ' + cart + '. ') if cart else ''}Thank you!")
+                        await self._speak(
+                            ws,
+                            f"Perfect. Your {mode_part} order{name_part} is confirmed. "
+                            f"{('Order: ' + cart + '. ') if cart else ''}Thank you!",
+                        )
                     else:
-                        await self._speak(ws, f"Top. Je {mode_part} bestelling{name_part} is bevestigd. {('Bestelling: ' + cart + '. ') if cart else ''}Dank je wel!")
-                    return
-                if self._is_refusal_like(transcript):
-                    st.pending_confirm = False
-                    await self._speak(ws, "No problem. What would you like to change?" if st.lang != "nl" else "Prima. Wat wil je wijzigen?")
+                        await self._speak(
+                            ws,
+                            f"Top. Je {mode_part} bestelling{name_part} is bevestigd. "
+                            f"{('Bestelling: ' + cart + '. ') if cart else ''}Dank je wel!",
+                        )
                     return
 
-                # Non-binary input: do NOT exit pending_confirm and do NOT fall through.
-                # Keep latch and ask for explicit yes/no.
+                # 3) Non-binary input, keep latch and ask for explicit yes/no
                 await self._speak(
                     ws,
-                    "Please say yes or no."
-                    if st.lang != "nl"
-                    else "Zeg alsjeblieft ja of nee.",
+                    "Please say yes or no." if st.lang != "nl" else "Zeg alsjeblieft ja of nee.",
                 )
                 return
-                # fall through to normal flow (do NOT reprompt)
 
             # Total amount / price query: we don't have pricing, but we can summarize and offer to confirm.
             if self._is_total_amount_query(transcript) and st.menu:
