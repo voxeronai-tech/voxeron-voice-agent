@@ -708,27 +708,49 @@ class SessionController:
         return any(k in t for k in keys)
 
     def _is_affirm(self, text: str) -> bool:
-        t = " " + norm_simple(text) + " "
-        keys = [" yes ", " yeah ", " yep ", " ok ", " okay ", " oke ", " oké ", " sure ", " correct ", " klopt ", " ja ", " prima ", " graag ", " indeed "]
-        return any(k in t for k in keys)
+        # Keep legacy name, but route through the canonical matcher
+        return self._is_yes_like(text)
 
     def _is_negative(self, text: str) -> bool:
-        t = " " + norm_simple(text) + " "
-        keys = [" no ", " nope ", " nah ", " nee ", " neen ", " liever niet ", " incorrect ", " klopt niet ", " not correct "]
-        return any(k in t for k in keys)
+        # Keep legacy name, but route through the canonical matcher
+        return self._is_refusal_like(text)
 
     def _is_refusal_like(self, text: str) -> bool:
-        t = " " + norm_simple(text) + " "
+        """
+        Detect explicit user rejection/correction while pending_confirm is active.
+        Conservative, deterministic, bilingual (EN/NL).
+        """
+        t_raw = (text or "").strip()
+        if not t_raw:
+            return False
+
+        t = " " + norm_simple(t_raw) + " "
+
+        # NOTE: Avoid overly broad tokens like "geen" because they create false positives
+        # (e.g. "geen probleem" is not a refusal).
         refusal = [
-            " no ", " nope ", " nah ", " i won't ", " i will not ", " dont ", " don't ", " rather not ",
-            " nee ", " neen ", " wil ik niet ", " geen ", " liever niet ", " weiger ",
+            # EN
+            " no ", " nope ", " nah ",
+            " don't ", " dont ", " do not ",
+            " i won't ", " i will not ", " rather not ",
+            " that's incorrect ", " that is incorrect ",
+            " wrong ", " not correct ",
+            " no wait ", " wait ",
+            # NL
+            " nee ", " neen ",
+            " wil ik niet ", " liever niet ",
+            " klopt niet ", " dat klopt niet ",
+            " onjuist ", " fout ",
+            " nee wacht ", " wacht ",
         ]
         return any(r in t for r in refusal)
 
     def _is_done_intent(self, text: str) -> bool:
         t = " " + norm_simple(text) + " "
         done = [
-            " that will be all ", " that'll be all ", " that ll be all ", " thats all ", " that's all ", " that s all ", " that s all ", " all good ", " that's it ", " that s it ", " that s it ",
+            " that will be all ", " that'll be all ", " that ll be all ",
+            " thats all ", " that's all ", " that s all ",
+            " all good ", " that's it ", " that s it ",
             " no that's all ", " no thats all ", " no thank you ", " no thanks ", " nothing else ",
             " klaar ", " klaar hoor ", " dat is alles ", " dat was alles ", " nee dat is alles ", " nee hoor dat is alles ",
             " bestelling is klaar ", " order is complete ", " order complete ",
@@ -746,45 +768,42 @@ class SessionController:
     def _is_pickup_delivery_mention(self, text: str) -> bool:
         # Used to avoid re-asking pickup/delivery once already known
         t = norm_simple(text)
-        return any(x in t for x in ["pickup", "pick up", "takeaway", "collection", "afhalen", "ophalen", "meenemen", "bezorgen", "bezorging", "delivery"])
+        return any(
+            x in t
+            for x in [
+                "pickup", "pick up", "takeaway", "collection",
+                "afhalen", "ophalen", "meenemen",
+                "bezorgen", "bezorging", "delivery",
+            ]
+        )
 
     def _is_yes_like(self, text: str) -> bool:
-        t = " " + norm_simple(text) + " "
-        yes = [
-            " yes ", " yeah ", " yep ", " yup ", " ok ", " okay ", " sure ", " please ", " sounds good ",
-            " ja ", " jazeker ", " zeker ", " oké ", " oke ", " prima ", " graag ", "top","toppie", "okidoki"
-        ]
-        return any(y in t for y in yes)
-    
-    def _is_refusal_like(self, text: str) -> bool:
-        """
-        Detect explicit user rejection/correction while pending_confirm is active.
-        This must be conservative, deterministic, and bilingual (EN/NL).
-        """
         t_raw = (text or "").strip()
         if not t_raw:
             return False
 
-        # Use same normalization style as elsewhere in the controller
-        try:
-            t = " " + norm_simple(t_raw) + " "
-        except Exception:
-            t = " " + t_raw.lower().strip() + " "
+        t = " " + norm_simple(t_raw) + " "
 
-        # Strong refusal tokens, keep it conservative (word-boundary style via padding)
-        refusal_phrases = [
+        # Base yes tokens
+        yes = [
             # EN
-            " no ", " nope ", " nah ",
-            " that's incorrect ", " that is incorrect ",
-            " wrong ", " not correct ",
-            " no wait ", " wait ",
+            " yes ", " yeah ", " yep ", " yup ", " ok ", " okay ", " sure ", " sounds good ",
             # NL
-            " nee ", " nee hoor ",
-            " klopt niet ", " dat klopt niet ",
-            " onjuist ", " fout ",
-            " nee wacht ", " wacht ",
+            " ja ", " jazeker ", " zeker ", " oké ", " oke ", " prima ", " graag ", " top ", " toppie ", " okidoki ",
         ]
-        return any(p in t for p in refusal_phrases)
+
+        # Confirmation equivalents that users naturally say after a summary
+        # IMPORTANT: include apostrophe-lost variants (that's -> that s / thats)
+        yes_equiv = [
+            # EN
+            " that's correct ", " that s correct ", " thats correct ", " that is correct ",
+            " correct ", " yes correct ",
+            " that's right ", " that s right ", " thats right ", " that is right ",
+            # NL
+            " dat klopt ", " klopt ", " ja klopt ", " helemaal goed ", " helemaal ",
+        ]
+
+        return any(y in t for y in yes) or any(p in t for p in yes_equiv)
 
     def _is_total_amount_query(self, text: str) -> bool:
         t = " " + norm_simple(text) + " "
@@ -797,7 +816,7 @@ class SessionController:
     def _is_order_complete_intent(self, text: str) -> bool:
         t = " " + norm_simple(text) + " "
         keys = [
-            " order is complete ", " that's all ", " that s all ", " that s all ", " that is all ", " done ", " finish ", " finished ", " complete the order ", " place the order ",
+            " order is complete ", " that's all ", " that s all ", " that is all ", " done ", " finish ", " finished ", " complete the order ", " place the order ",
             " dat is alles ", " klaar ", " afronden ", " bestelling is klaar ", " rond de bestelling af ",
         ]
         return any(k in t for k in keys)
@@ -834,11 +853,12 @@ class SessionController:
         if " english " in t or " engels " in t:
             return "en"
         return None
+
     def _clean_customer_name(self, text: str) -> str:
         """Normalize name answers, accept prefixes like 'my name is' / 'mijn naam is'."""
         t = (text or "").strip()
         tn = norm_simple(t)
-        # Strip common prefixes in EN/NL
+
         prefixes = [
             "my name is ",
             "name is ",
@@ -851,9 +871,6 @@ class SessionController:
         ]
         for p in prefixes:
             if tn.startswith(p):
-                # remove from original string by length of prefix in normalized form approx
-                # easiest: remove from tn and then map back by taking remainder from original split
-                # We'll just take remainder from original by splitting on spaces count.
                 words = t.split()
                 p_words = p.strip().split()
                 if len(words) > len(p_words):
@@ -1016,6 +1033,7 @@ class SessionController:
             [o[0] for o in (self._naan_options_from_menu(menu) if menu else [])],
         )
         return mentions_nan, has_variant, variant
+    
     def _naan_options_from_menu(self, menu: MenuSnapshot) -> List[Tuple[str, str]]:
         if not menu:
             return []
@@ -2317,7 +2335,7 @@ class SessionController:
                         await self._speak(ws, f"{thank} Ter bevestiging: {cart}, voor {mode_part}. Klopt dat?")
                     else:
                         await self._speak(ws, f"{thank} Klopt dat?")
-
+                return
             # ==========================================================
             # 5b) Checkout / confirmation guards (RC3)
             # ==========================================================
@@ -2341,6 +2359,30 @@ class SessionController:
                             st.phase = "ORDERING"
                         except Exception:
                             pass
+
+                    # S1-4B: confirmation refusal telemetry (non-blocking, must not affect control flow)
+                    if hasattr(self, "_telemetry") and self._telemetry and hasattr(self._telemetry, "emit_reason_only"):
+                        self._telemetry.emit_reason_only(
+                            ctx=self._telemetry_ctx(),
+                            reason="CONFIRMATION_REFUSED_BY_USER",
+                            meta={
+                                "phase": getattr(st, "phase", None),
+                                "lang": getattr(st, "lang", None),
+                                "pending_confirm": True,
+                            },
+                        )
+                    else:
+                        logger.warning(
+                            "telemetry: emit_reason_only missing, cannot emit CONFIRMATION_REFUSED_BY_USER"
+                        )
+
+                    await self._speak(
+                        ws,
+                        "Okay, no problem. What would you like to change or add?"
+                        if st.lang != "nl"
+                        else "Oké, geen probleem. Wat wil je aanpassen of toevoegen?",
+                    )
+                    return
 
                     # Telemetry hook, defensive, only if a telemetry emitter exists on this controller
                     try:
