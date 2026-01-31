@@ -25,8 +25,23 @@ from .policy import (
     post_cart_followup,
 )
 from .services.openai_client import OpenAIClient
+from .telemetry.emitter import TelemetryEmitter, TelemetryContext
 
 logger = logging.getLogger("taj-agent")
+
+
+def _telemetry_ctx(st) -> TelemetryContext:
+    sid = (
+        getattr(st, "session_id", None)
+        or getattr(st, "session_uuid", None)
+        or getattr(st, "ws_id", None)
+        or "unknown"
+    )
+    return TelemetryContext(
+        session_id=str(sid),
+        tenant_id=str(getattr(st, "tenant_ref", "unknown")),
+        domain=str(getattr(st, "tenant_ref", "unknown")),
+    )
 
 SESSION_CONTROLLER_VERSION = "2026-01-03T-optima-flow-v3-offer-slots-no-repeat-pickup-name-spicy-one-qty-fix-naan-short"
 
