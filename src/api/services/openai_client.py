@@ -84,6 +84,18 @@ def _clamp_float(x: Any, lo: float, hi: float, default: float) -> float:
 def _safe_json_loads(s: Any) -> Optional[Dict[str, Any]]:
     if not s:
         return None
+
+
+def _norm_lang(lang: Optional[str]) -> Optional[str]:
+    """Normalize language hints for STT safely."""
+    if not lang:
+        return None
+    l = str(lang).strip()
+    if not l:
+        return None
+    if len(l) > 16:
+        return None
+    return l
     if isinstance(s, dict):
         return s
     try:
@@ -112,14 +124,75 @@ class OpenAIClient:
     # -------------------------
     # STT
     # -------------------------
+
     async def transcribe_pcm(
         self,
         pcm16: bytes,
         lang: Optional[str],
         prompt: Optional[str] = None,
+        *,
+        debug_tag: Optional[str] = None,
     ) -> str:
         if not pcm16:
             return ""
+
+        # Log before preprocessing so pcm16_to_wav failures don't hide STT attempts
+        if getattr(settings, "DEBUG_SEGMENTATION", False):
+            try:
+                pcm_bytes = len(pcm16)
+                est_ms = int((pcm_bytes / 32000.0) * 1000.0) if pcm_bytes else 0
+                logger.info(
+                    "STT_CALL_PRE: model=%s lang=%s prompt_len=%s pcm_bytes=%s est_ms=%s tag=%s",
+                    self.stt_model,
+                    _norm_lang(lang) or "",
+                    len(prompt) if prompt else 0,
+                    pcm_bytes,
+                    est_ms,
+                    debug_tag or "",
+                )
+            except Exception:
+                pass
+
+        wav_bytes = pcm16_to_wav(pcm16, self.sample_rate)
+        f = io.BytesIO(wav_bytes)
+        f.name = "audio.wav"
+
+        kwargs: Dict[str, Any] = {"model": self.stt_model, "file": f}
+
+        if prompt:
+            kwargs["prompt"] = str(prompt)
+
+        stt_lang = _norm_lang(lang)
+        if stt_lang:
+            kwargs["language"] = stt_lang
+
+        # Always log under DEBUG_SEGMENTATION (even when lang/prompt/tag are empty)
+        if getattr(settings, "DEBUG_SEGMENTATION", False) or debug_tag or stt_lang or prompt:
+            try:
+                logger.info(
+                    "STT_CALL tag=%s model=%s lang=%s prompt_len=%s",
+                    debug_tag or "",
+                    self.stt_model,
+                    stt_lang or "",
+                    len(prompt) if prompt else 0,
+                )
+                pcm_bytes = len(pcm16)
+                est_ms = int((pcm_bytes / 32000.0) * 1000.0) if pcm_bytes else 0
+                logger.info("STT_PCM bytes=%s est_ms=%s", pcm_bytes, est_ms)
+            except Exception:
+                pass
+
+        resp = await self.sdk.audio.transcriptions.create(**kwargs)
+        text = (getattr(resp, "text", "") or "").strip()
+
+        if getattr(settings, "DEBUG_SEGMENTATION", False) or debug_tag or stt_lang or prompt:
+            try:
+                logger.info("STT_RESULT len=%s text=%r", len(text), text[:120])
+            except Exception:
+                pass
+
+        return text
+
         wav_bytes = pcm16_to_wav(pcm16, self.sample_rate)
         f = io.BytesIO(wav_bytes)
         f.name = "audio.wav"
@@ -165,14 +238,36 @@ class OpenAIClient:
     # -------------------------
     # OPTIONAL: ultra-fast intent helpers (no LLM)
     # -------------------------
+
     def fast_yes_no(self, text: str) -> Optional[str]:
         """
         Returns 'AFFIRM'/'NEGATE' for ultra-short exact responses, else None.
         This is optional sugar for SessionController; safe to ignore.
         """
-        t = (text or "").strip().lower()
+        raw = (text or "")
+        t = raw.strip().lower()
         if not t:
             return None
+
+        # Step 1: remove apostrophes (covers "that's")
+        t = t.replace("'", "").replace("’", "")
+
+        # Step 2: remove remaining punctuation into spaces
+        t_norm = re.sub(r"[^a-z0-9\s]", " ", t)
+        t_norm = " ".join(t_norm.split()).strip()
+
+        # Step 3: repair common STT split-contractions (covers "that s correct")
+        t_norm = re.sub(r"\b(that|it|there|here)\s+s\b", r"\1s", t_norm)
+
+        if not t_norm:
+            return None
+
+        if t_norm in {"yes", "yeah", "yep", "ok", "okay", "sure", "ja", "jawel", "prima", "oke", "correct"}:
+            return "AFFIRM"
+        if t_norm in {"no", "nope", "nee"}:
+            return "NEGATE"
+        return None
+
         # keep this deliberately tiny (fast-path)
         if t in {"yes", "yeah", "yep", "ok", "okay", "sure", "ja", "prima", "oke"}:
             return "AFFIRM"
