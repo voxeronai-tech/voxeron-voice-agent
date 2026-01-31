@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import time
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -29,74 +28,95 @@ from .tenant_manager import TenantManager
 from .session_controller import SessionController, SessionState, SESSION_CONTROLLER_VERSION
 from .services.audio import VAD, rms_pcm16
 from .services.openai_client import OpenAIClient
+from contextlib import asynccontextmanager
 
 
 def _load_dotenv_if_present() -> None:
+    """
+    Load a local .env file if python-dotenv is installed.
+    IMPORTANT: Must run before importing settings so env overrides are visible.
+    """
     try:
         from dotenv import load_dotenv  # type: ignore
+
         load_dotenv()
     except Exception:
         pass
 
-
 _load_dotenv_if_present()
 
+# Centralized settings (single source of truth for env-driven config)
+from . import settings  # noqa: E402
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=LOG_LEVEL)
+# --------------------------------------------------
+# Logging (configured once)
+# --------------------------------------------------
+logging.basicConfig(level=settings.LOG_LEVEL)
 logger = logging.getLogger("taj-agent")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global menu_store
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_STT_MODEL = os.getenv("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe")
-OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
-OPENAI_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
+    logger.info(
+        "[startup] SessionController version=%s",
+        SESSION_CONTROLLER_VERSION,
+    )
 
-OPENAI_TTS_VOICE_EN = os.getenv("OPENAI_TTS_VOICE_EN", "cedar")
-OPENAI_TTS_VOICE_NL = os.getenv("OPENAI_TTS_VOICE_NL", "marin")
+    db_url = (settings.DATABASE_URL or "").strip()
+    logger.info("[startup] DATABASE_URL set=%s", bool(db_url))
 
-OPENAI_TTS_INSTRUCTIONS_EN = os.getenv("OPENAI_TTS_INSTRUCTIONS_EN", "").strip()
-OPENAI_TTS_INSTRUCTIONS_NL = os.getenv("OPENAI_TTS_INSTRUCTIONS_NL", "").strip()
+    if not settings.OPENAI_API_KEY:
+        logger.warning("OPENAI_API_KEY missing; STT/TTS/LLM calls will fail.")
 
-TENANTS_DIR = os.getenv("TENANTS_DIR", "tenants")
-TENANT_RULES_ENABLED = os.getenv("TENANT_RULES_ENABLED", "0") == "1"
-TENANT_STT_PROMPT_ENABLED = os.getenv("TENANT_STT_PROMPT_ENABLED", "1") == "1"
-TENANT_TTS_INSTRUCTIONS_ENABLED = os.getenv("TENANT_TTS_INSTRUCTIONS_ENABLED", "1") == "1"
+    # ---- optional MenuStore (must never block startup) ----
+    if db_url:
+        try:
+            menu_store = MenuStore(
+                db_url,
+                ttl_seconds=settings.MENU_TTL_SECONDS,
+                schema=settings.MENU_SCHEMA,
+            )
+            await menu_store.start()
+            logger.info("MenuStore started")
+        except Exception:
+            logger.exception(
+                "MenuStore failed to start; continuing without DB-backed menu"
+            )
+            menu_store = None
+    else:
+        logger.warning("DATABASE_URL missing; MenuStore disabled.")
+        menu_store = None
 
-DATABASE_URL = os.getenv("DATABASE_URL", "")
-MENU_TTL_SECONDS = int(os.getenv("MENU_TTL_SECONDS", "180"))
-MENU_SCHEMA = os.getenv("MENU_SCHEMA", "public")
+    # ---- application runs here ----
+    try:
+        yield
+    finally:
+        if menu_store:
+            try:
+                await menu_store.close()
+            except Exception:
+                logger.exception("Error while closing MenuStore")
+        menu_store = None
+        logger.info("MenuStore closed")
 
-SAMPLE_RATE = int(os.getenv("AUDIO_SAMPLE_RATE", "16000"))
-FRAME_MS = int(os.getenv("AUDIO_FRAME_MS", "20"))
-
-STARTUP_IGNORE_SEC = float(os.getenv("STARTUP_IGNORE_SEC", "1.5"))
-ENERGY_FLOOR = float(os.getenv("ENERGY_FLOOR", "0.006"))
-SPEECH_CONFIRM_FRAMES = int(os.getenv("SPEECH_CONFIRM_FRAMES", "3"))
-MIN_UTTERANCE_MS = int(os.getenv("MIN_UTTERANCE_MS", "900"))
-SILENCE_END_MS = int(os.getenv("SILENCE_END_MS", "650"))
-
-HEARTBEAT_IDLE_SEC_DEFAULT = int(os.getenv("HEARTBEAT_IDLE_SEC", "28"))
-HEARTBEAT_IDLE_SEC_MIN = int(os.getenv("HEARTBEAT_IDLE_SEC_MIN", "25"))
-HEARTBEAT_CHECK_EVERY_SEC = float(os.getenv("HEARTBEAT_CHECK_EVERY_SEC", "1.0"))
-HEARTBEAT_GRACE_AFTER_GREETING_SEC = float(os.getenv("HEARTBEAT_GRACE_AFTER_GREETING_SEC", "10.0"))
-
-HEARTBEAT_DEBUG_EVERY_SEC = float(os.getenv("HEARTBEAT_DEBUG_EVERY_SEC", "5.0"))
-COUNT_AUDIO_AS_ACTIVITY = os.getenv("COUNT_AUDIO_AS_ACTIVITY", "0") == "1"
-
-
-app = FastAPI()
-tenant_manager = TenantManager(TENANTS_DIR)
+# --------------------------------------------------
+# App globals
+# --------------------------------------------------
+app = FastAPI(lifespan=lifespan)
+tenant_manager = TenantManager(settings.TENANTS_DIR)
 menu_store: Optional[MenuStore] = None
 
 oa = OpenAIClient(
-    api_key=OPENAI_API_KEY,
-    stt_model=OPENAI_STT_MODEL,
-    chat_model=OPENAI_CHAT_MODEL,
-    tts_model=OPENAI_TTS_MODEL,
-    sample_rate=SAMPLE_RATE,
+    api_key=settings.OPENAI_API_KEY,
+    stt_model=settings.OPENAI_STT_MODEL,
+    chat_model=settings.OPENAI_CHAT_MODEL,
+    tts_model=settings.OPENAI_TTS_MODEL,
+    sample_rate=settings.AUDIO_SAMPLE_RATE,
 )
 
-
+# --------------------------------------------------
+# WS helpers
+# --------------------------------------------------
 async def send_json(ws: WebSocket, obj: Dict[str, Any]) -> None:
     await ws.send_text(json.dumps(obj, ensure_ascii=False))
 
@@ -125,30 +145,33 @@ async def clear_audio_queue(ws: WebSocket) -> None:
     await send_json(ws, {"type": "clear_audio_queue"})
 
 
+# --------------------------------------------------
+# Tenant-aware choices
+# --------------------------------------------------
 def choose_voice(lang: str, state: SessionState) -> str:
     cfg = state.tenant_cfg
     if cfg and getattr(cfg, "tts_voices", None) and lang in cfg.tts_voices:
         return cfg.tts_voices[lang]
-    if lang == "nl":
-        return OPENAI_TTS_VOICE_NL
-    return OPENAI_TTS_VOICE_EN
+    return settings.OPENAI_TTS_VOICE_NL if lang == "nl" else settings.OPENAI_TTS_VOICE_EN
 
 
 def choose_tts_instructions(lang: str, state: SessionState) -> str:
-    if not TENANT_TTS_INSTRUCTIONS_ENABLED:
+    if not settings.TENANT_TTS_INSTRUCTIONS_ENABLED:
         return ""
     cfg = state.tenant_cfg
     if cfg and getattr(cfg, "tts_instructions", None) and lang in cfg.tts_instructions:
         return (cfg.tts_instructions.get(lang) or "").strip()
-    if lang == "nl":
-        return OPENAI_TTS_INSTRUCTIONS_NL
-    return OPENAI_TTS_INSTRUCTIONS_EN
+    return settings.OPENAI_TTS_INSTRUCTIONS_NL if lang == "nl" else settings.OPENAI_TTS_INSTRUCTIONS_EN
 
 
 def enforce_output_language(text: str, lang: str) -> str:
+    # Transport layer should not rewrite content; keep minimal normalization.
     return (text or "").strip()
 
 
+# --------------------------------------------------
+# Greetings
+# --------------------------------------------------
 def greeting_text_taj(lang: str) -> str:
     hour = datetime.now().hour
     if lang == "nl":
@@ -194,7 +217,6 @@ def _is_dispatcher_tenant(tenant_ref: str, tenant_cfg) -> bool:
             return True
     return False
 
-
 @app.get("/tenant_config")
 async def tenant_config(tenant: str = "default") -> JSONResponse:
     tenant_ref = _resolve_tenant_ref(tenant)
@@ -238,118 +260,86 @@ async def tenant_config(tenant: str = "default") -> JSONResponse:
 
 
 async def heartbeat_loop(ws: WebSocket, controller: SessionController) -> None:
+    """
+    Periodic liveness loop:
+    - emits debug heartbeat logs
+    - checks idle timeout and closes call if needed
+
+    IMPORTANT: all timing parameters come from src.api.settings (single source of truth).
+    """
     st = controller.state
-    try:
-        last_heartbeat_ts = 0.0
-        connected_ts = time.time()
-        setattr(st, "_hb_last_log_ts", 0.0)
 
-        while True:
-            await asyncio.sleep(HEARTBEAT_CHECK_EVERY_SEC)
+    last_debug_ts = 0.0
+    started_ts = time.time()
 
-            cfg = st.tenant_cfg
-            idle_sec = HEARTBEAT_IDLE_SEC_DEFAULT
-            msg_en = "Still there?"
-            msg_nl = "Ben je er nog?"
-            msg_tr = "Orada mısınız?"
+    while True:
+        # Exit if websocket already closed
+        try:
+            await asyncio.sleep(settings.HEARTBEAT_CHECK_EVERY_SEC)
+        except asyncio.CancelledError:
+            return
 
-            if cfg and getattr(cfg, "rules", None):
-                hb = (cfg.rules.get("heartbeat") or {})
-                try:
-                    idle_sec = int(hb.get("idle_seconds") or idle_sec)
-                except Exception:
-                    pass
-                msg_en = str(hb.get("en") or msg_en)
-                msg_nl = str(hb.get("nl") or msg_nl)
-                msg_tr = str(hb.get("tr") or msg_tr)
+        now = time.time()
 
-            idle_sec = max(int(idle_sec), int(HEARTBEAT_IDLE_SEC_MIN))
+        # heartbeat grace after greeting (prevents immediate timeout at call start)
+        grace_ok = (now - started_ts) < settings.HEARTBEAT_GRACE_AFTER_GREETING_SEC
+        if grace_ok:
+            # Still allow debug logging during grace
+            pass
 
-            if (time.time() - connected_ts) < HEARTBEAT_GRACE_AFTER_GREETING_SEC:
-                continue
+        # Determine anchor (latest activity among user/agent)
+        last_user_end = float(getattr(st, "last_user_utter_end_ts", 0.0) or 0.0)
+        last_agent_end = float(getattr(st, "last_agent_speech_end_ts", 0.0) or 0.0)
+        last_activity = float(getattr(st, "last_activity_ts", 0.0) or 0.0)
 
-            if st.is_processing or getattr(st, "is_speaking", False):
-                continue
+        anchor = max(last_activity, last_user_end, last_agent_end)
+        idle = max(0.0, now - anchor)
 
-            if getattr(st, "pending_choice", None):
-                continue
+        # Determine idle timeout threshold
+        idle_sec = max(settings.HEARTBEAT_IDLE_SEC_MIN, settings.HEARTBEAT_IDLE_SEC_DEFAULT)
 
-            # ✅ Offer is pending -> do NOT heartbeat
-            if getattr(st, "offered_item_id", None):
-                continue
-
-            last_user_end = float(getattr(st, "last_user_utter_end_ts", 0.0) or 0.0)
-            last_agent_end = float(getattr(st, "last_agent_speech_end_ts", 0.0) or 0.0)
-            last_activity = float(getattr(st, "last_activity_ts", 0.0) or 0.0)
-
-            anchor = max([last_user_end, last_agent_end, float(last_heartbeat_ts or 0.0), last_activity])
-            idle = time.time() - anchor
-
-            now_ts = time.time()
-            last_log = float(getattr(st, "_hb_last_log_ts") or 0.0)
-            if (now_ts - last_log) >= HEARTBEAT_DEBUG_EVERY_SEC:
-                setattr(st, "_hb_last_log_ts", now_ts)
+        # Debug logging (rate-limited)
+        if settings.HEARTBEAT_DEBUG_EVERY_SEC > 0:
+            if (now - last_debug_ts) >= settings.HEARTBEAT_DEBUG_EVERY_SEC:
+                last_debug_ts = now
                 logger.info(
-                    "[hb] idle=%.1fs / idle_sec=%s anchor=%.0f (user_end=%.0f agent_end=%.0f activity=%.0f hb=%.0f) "
+                    "[hb] idle=%.1fs / idle_sec=%s anchor=%s (user_end=%s agent_end=%s activity=%s hb=0) "
                     "processing=%s speaking=%s pending_choice=%s offered_item_id=%s phase=%s lang=%s",
                     idle,
                     idle_sec,
-                    anchor,
-                    last_user_end,
-                    last_agent_end,
-                    last_activity,
-                    last_heartbeat_ts,
-                    st.is_processing,
-                    getattr(st, "is_speaking", False),
+                    int(anchor),
+                    int(last_user_end),
+                    int(last_agent_end),
+                    int(last_activity),
+                    bool(getattr(st, "proc_task", None) and not st.proc_task.done()),
+                    bool(getattr(st, "tts_task", None) and not st.tts_task.done()),
                     getattr(st, "pending_choice", None),
                     getattr(st, "offered_item_id", None),
-                    st.phase,
-                    st.lang,
+                    getattr(st, "phase", None),
+                    getattr(st, "lang", None),
                 )
 
-            if idle >= idle_sec and st.phase in ("language_select", "chat", "dispatcher"):
-                if st.lang == "nl":
-                    msg = msg_nl
-                elif st.lang == "tr":
-                    msg = msg_tr
-                else:
-                    msg = msg_en
+        # Do not enforce idle timeout during grace window
+        if grace_ok:
+            continue
 
-                msg = enforce_output_language(msg, st.lang)
-                last_heartbeat_ts = time.time()
-                st.last_activity_ts = last_heartbeat_ts
+        # If currently processing or speaking, do not time out
+        processing = bool(getattr(st, "proc_task", None) and not st.proc_task.done())
+        speaking = bool(getattr(st, "tts_task", None) and not st.tts_task.done())
+        if processing or speaking:
+            continue
 
-                await send_agent_text(ws, msg)
-                await controller.stream_tts_mp3(ws, msg)
-
-    except asyncio.CancelledError:
-        return
-    except Exception:
-        return
-
-
-@app.on_event("startup")
-async def _startup() -> None:
-    global menu_store
-    logger.info("[startup] SessionController version=%s", SESSION_CONTROLLER_VERSION)
-
-    if not OPENAI_API_KEY:
-        logger.warning("OPENAI_API_KEY missing. STT/TTS/LLM will fail.")
-    if DATABASE_URL:
-        menu_store = MenuStore(DATABASE_URL, ttl_seconds=MENU_TTL_SECONDS, schema=MENU_SCHEMA)
-        await menu_store.start()
-        logger.info("MenuStore started (Neon)")
-    else:
-        logger.warning("DATABASE_URL missing; MenuStore disabled.")
-
-
-@app.on_event("shutdown")
-async def _shutdown() -> None:
-    global menu_store
-    if menu_store:
-        await menu_store.close()
-    menu_store = None
-
+        # Idle timeout reached -> close call
+        if idle >= float(idle_sec):
+            try:
+                await send_agent_text(ws, "Call ended due to inactivity.")
+            except Exception:
+                pass
+            try:
+                await ws.close()
+            except Exception:
+                pass
+            return
 
 async def _handle_ws(ws: WebSocket) -> None:
     await ws.accept()
@@ -389,15 +379,26 @@ async def _handle_ws(ws: WebSocket) -> None:
 
     state.menu = snap
     logger.info("Tenant resolved: %s (%s)", state.tenant_name or "n/a", state.tenant_id or "n/a")
+    
+    def _track_task(label: str, t: asyncio.Task) -> asyncio.Task:
+        def _done(_t: asyncio.Task) -> None:
+            try:
+                _t.result()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("%s task crashed", label)
+        t.add_done_callback(_done)
+        return t
 
     controller = SessionController(
         state=state,
         tenant_manager=tenant_manager,
         menu_store=menu_store,
         oa=oa,
-        tenant_rules_enabled=TENANT_RULES_ENABLED,
-        tenant_stt_prompt_enabled=TENANT_STT_PROMPT_ENABLED,
-        tenant_tts_instructions_enabled=TENANT_TTS_INSTRUCTIONS_ENABLED,
+        tenant_rules_enabled=settings.TENANT_RULES_ENABLED,
+        tenant_stt_prompt_enabled=settings.TENANT_STT_PROMPT_ENABLED,
+        tenant_tts_instructions_enabled=settings.TENANT_TTS_INSTRUCTIONS_ENABLED,
         choose_voice=choose_voice,
         choose_tts_instructions=choose_tts_instructions,
         enforce_output_language=enforce_output_language,
@@ -429,17 +430,54 @@ async def _handle_ws(ws: WebSocket) -> None:
     state.last_activity_ts = state.last_agent_speech_end_ts
 
     vad = VAD(
-        frame_ms=FRAME_MS,
-        energy_floor=ENERGY_FLOOR,
-        speech_confirm_frames=SPEECH_CONFIRM_FRAMES,
-        silence_end_ms=SILENCE_END_MS,
-        min_utterance_ms=MIN_UTTERANCE_MS,
+        frame_ms=settings.AUDIO_FRAME_MS,
+        energy_floor=settings.ENERGY_FLOOR,
+        speech_confirm_frames=settings.SPEECH_CONFIRM_FRAMES,
+        silence_end_ms=settings.SILENCE_END_MS,
+        min_utterance_ms=settings.MIN_UTTERANCE_MS,
+        preroll_ms=settings.VAD_PREROLL_MS,
+        debug=settings.VAD_DEBUG,
     )
     started = time.time()
 
+    # RC3: merge split user turns across short pauses (prevents agent interrupting)
+    pending_utter: bytes | None = None
+    pending_deadline_ts: float = 0.0
+
+    # Base grace window, tuned for normal speech pauses
+    PAUSE_MERGE_SEC = settings.PAUSE_MERGE_SEC
+
+    # Extra patience if the buffered utter is "short" (likely stutter / incomplete thought)
+    PAUSE_MERGE_SEC_FRAGMENT = settings.PAUSE_MERGE_SEC_FRAGMENT
+    FRAGMENT_MAX_BYTES = settings.FRAGMENT_MAX_BYTES # ~0.5s at 16kHz * 16-bit mono (adjust if your PCM differs)
+
+    # Server-side barge-in on audio energy (in case client doesn't send "barge_in")
+    # tune, start ~350-600 depending on mic/noise
+    BARGE_IN_RMS = settings.BARGE_IN_RMS
+
     try:
         while True:
-            msg = await ws.receive()
+            # ✅ Robust disconnect handling: Starlette can either raise WebSocketDisconnect,
+            # or return a disconnect frame, and/or raise RuntimeError if receive() is called
+            # after a disconnect message has been processed.
+            try:
+                msg = await ws.receive()
+            except WebSocketDisconnect:
+                logger.info("ws disconnect (WebSocketDisconnect) — exiting loop")
+                break
+            except RuntimeError as e:
+                if 'Cannot call "receive" once a disconnect message has been received' in str(e):
+                    logger.info("ws disconnect (runtime after disconnect) — exiting loop")
+                    break
+                raise
+
+            if not msg:
+                logger.info("ws receive returned empty message — exiting loop")
+                break
+
+            if msg.get("type") == "websocket.disconnect":
+                logger.info("ws disconnect frame — exiting loop")
+                break
 
             if msg.get("text") is not None:
                 try:
@@ -467,18 +505,37 @@ async def _handle_ws(ws: WebSocket) -> None:
             if not frame:
                 continue
 
-            if (time.time() - started) < STARTUP_IGNORE_SEC:
+            if (time.time() - started) < settings.STARTUP_IGNORE_SEC:
                 continue
 
-            if COUNT_AUDIO_AS_ACTIVITY:
+            if settings.COUNT_AUDIO_AS_ACTIVITY:
                 state.last_activity_ts = time.time()
 
             e = rms_pcm16(frame)
-            utter = vad.feed(frame, e)
-            if utter:
+
+            # B) Hard barge-in (server-side): if user starts talking while TTS is playing, stop TTS immediately.
+            # This is independent of the client "barge_in" text event.
+            if state.tts_task and not state.tts_task.done() and e >= settings.BARGE_IN_RMS:
+                tnow = time.time()
+                state.last_activity_ts = tnow
+                state.last_agent_speech_end_ts = tnow
+                try:
+                    state.tts_task.cancel()
+                except Exception:
+                    pass
+                await clear_audio_queue(ws)
+                # Do NOT continue; still feed VAD so we capture the user's utterance.
+
+            # Flush pending utter if the pause-merge window elapsed
+            if pending_utter is not None and time.time() >= pending_deadline_ts:
                 tnow = time.time()
                 state.last_activity_ts = tnow
                 setattr(state, "last_user_utter_end_ts", tnow)
+
+                # Snapshot bytes BEFORE clearing, so we never accidentally pass None/empty
+                utter_to_process = pending_utter
+                pending_utter = None
+                pending_deadline_ts = 0.0
 
                 if state.proc_task and not state.proc_task.done():
                     try:
@@ -486,10 +543,44 @@ async def _handle_ws(ws: WebSocket) -> None:
                     except Exception:
                         pass
 
-                state.proc_task = asyncio.create_task(controller.process_utterance(ws, utter))
+                if settings.DEBUG_SEGMENTATION:
+                    logger.info("SEGMENT DISPATCH: bytes=%s", len(utter_to_process))
 
-    except WebSocketDisconnect:
-        pass
+                state.proc_task = _track_task(
+                    "process_utterance",
+                    asyncio.create_task(controller.process_utterance(ws, utter_to_process)),
+                )
+
+            utter = vad.feed(frame, e)
+            if utter:
+                tnow = time.time()
+                state.last_activity_ts = tnow
+                setattr(state, "last_user_utter_end_ts", tnow)
+
+                # RC3: merge short pauses into a single user turn
+                if pending_utter is None:
+                    pending_utter = utter
+                else:
+                    pending_utter += utter
+
+                # Adaptive grace window: short utterances are often stutters/fragments,
+                # so wait longer before flushing to STT to avoid interrupting the user.
+                is_fragment = bool(pending_utter and len(pending_utter) <= settings.FRAGMENT_MAX_BYTES)
+                grace = settings.PAUSE_MERGE_SEC_FRAGMENT if is_fragment else settings.PAUSE_MERGE_SEC
+                pending_deadline_ts = tnow + grace
+
+                if settings.DEBUG_SEGMENTATION:
+                    logger.info(
+                        "SEGMENT ARM: pending_bytes=%d is_fragment=%s grace=%.2fs now=%.3f new_deadline=%.3f",
+                        len(pending_utter) if pending_utter else 0,
+                        is_fragment,
+                        grace,
+                        tnow,
+                        pending_deadline_ts,
+                    )
+
+                continue
+
     except Exception as e:
         logger.exception("ws loop error: %s", e)
     finally:
@@ -522,4 +613,3 @@ async def ws_pcm(ws: WebSocket) -> None:
 @app.websocket("/ws")
 async def ws_alias(ws: WebSocket) -> None:
     await _handle_ws(ws)
-
