@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import io
 import logging
-import os
 import time
 import wave
 from collections import deque
@@ -55,6 +54,9 @@ class VAD:
         speech_confirm_frames: int,
         silence_end_ms: int,
         min_utterance_ms: int,
+        *,
+        preroll_ms: int = 300,
+        debug: bool = False,
     ):
         self.frame_ms = int(frame_ms)
         self.energy_floor = float(energy_floor)
@@ -68,14 +70,9 @@ class VAD:
         self.buf = bytearray()
         self.started_at = 0.0
 
-        # --- Pre-roll configuration (env-tunable) ---
-        # Keep the last N frames while not in speech; prepend them when speech is confirmed.
-        preroll_ms = int(os.getenv("VAD_PREROLL_MS", "300").strip() or "300")
-        self._preroll_frames = max(1, preroll_ms // max(1, self.frame_ms))
+        self._preroll_frames = max(1, int(preroll_ms) // max(1, self.frame_ms))
         self._preroll: Deque[bytes] = deque(maxlen=self._preroll_frames)
-
-        # Debug (env-guarded)
-        self._debug = (os.getenv("VAD_DEBUG", "0").strip() == "1")
+        self._debug = bool(debug)
 
     def reset(self) -> None:
         self.in_speech = False
@@ -89,8 +86,6 @@ class VAD:
         is_voice = energy >= self.energy_floor
 
         if not self.in_speech:
-            # Always collect a rolling pre-roll buffer (even when energy is below the floor).
-            # This prevents truncating the start of speech when confirmation is delayed.
             self._preroll.append(frame)
 
             if is_voice:
