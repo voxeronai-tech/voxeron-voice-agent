@@ -3,18 +3,17 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
+import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from openai import AsyncOpenAI
 
+from .. import settings
+from ..intent import norm_simple
 from .audio import pcm16_to_wav
-
-from src.api.intent import norm_simple
-
-from typing import Optional
-import re
 
 logger = logging.getLogger("taj-agent")
 
@@ -73,9 +72,6 @@ def _clamp_int(x: Any, lo: int, hi: int, default: int) -> int:
     try:
         v = int(x)
     except Exception:
-        t = (default or "").strip()
-        logger.info("STT_RESULT len=%s text=%r", len(t), t[:120])
-
         return default
     return max(lo, min(hi, v))
 
@@ -113,7 +109,6 @@ def _norm_lang(lang: Optional[str]) -> Optional[str]:
     l = str(lang).strip()
     if not l:
         return None
-    # Keep it short-ish and sane
     if len(l) > 16:
         return None
     return l
@@ -157,6 +152,20 @@ class OpenAIClient:
         if not pcm16:
             return ""
 
+        # Log before preprocessing so pcm16_to_wav failures don't hide STT attempts
+        if settings.DEBUG_SEGMENTATION:
+            pcm_bytes = len(pcm16)
+            est_ms = int((pcm_bytes / 32000.0) * 1000.0) if pcm_bytes else 0
+            logger.info(
+                "STT_CALL_PRE: model=%s lang=%s prompt_len=%s pcm_bytes=%s est_ms=%s tag=%s",
+                self.stt_model,
+                _norm_lang(lang) or "",
+                len(prompt) if prompt else 0,
+                pcm_bytes,
+                est_ms,
+                debug_tag or "",
+            )
+
         wav_bytes = pcm16_to_wav(pcm16, self.sample_rate)
         f = io.BytesIO(wav_bytes)
         f.name = "audio.wav"
@@ -168,13 +177,11 @@ class OpenAIClient:
 
         stt_lang = _norm_lang(lang)
         if stt_lang:
-            # Make this permissive. The API supports many tags; restricting to a small set
-            # causes silent "no language" behavior and drift.
             kwargs["language"] = stt_lang
 
-        # Debug log for field validation during RC3
-        try:
-            if debug_tag or stt_lang or prompt:
+        # Always log under DEBUG_SEGMENTATION (even when lang/prompt/tag are empty)
+        if settings.DEBUG_SEGMENTATION or debug_tag or stt_lang or prompt:
+            try:
                 logger.info(
                     "STT_CALL tag=%s model=%s lang=%s prompt_len=%s",
                     debug_tag or "",
@@ -182,22 +189,20 @@ class OpenAIClient:
                     stt_lang or "",
                     len(prompt) if prompt else 0,
                 )
-
-                pcm_bytes = len(pcm16 or b"")
+                pcm_bytes = len(pcm16)
                 est_ms = int((pcm_bytes / 32000.0) * 1000.0) if pcm_bytes else 0
                 logger.info("STT_PCM bytes=%s est_ms=%s", pcm_bytes, est_ms)
-        except Exception:
-            pass
+            except Exception:
+                pass
 
         resp = await self.sdk.audio.transcriptions.create(**kwargs)
         text = (getattr(resp, "text", "") or "").strip()
 
-        # Debug log for result visibility during RC3/RC1-3 testing
-        try:
-            if debug_tag or stt_lang or prompt:
+        if settings.DEBUG_SEGMENTATION or debug_tag or stt_lang or prompt:
+            try:
                 logger.info("STT_RESULT len=%s text=%r", len(text), text[:120])
-        except Exception:
-            pass
+            except Exception:
+                pass
 
         return text
 
@@ -231,7 +236,6 @@ class OpenAIClient:
     # -------------------------
     # OPTIONAL: ultra-fast intent helpers (no LLM)
     # -------------------------
-
     def fast_yes_no(self, text: str) -> Optional[str]:
         """
         Returns 'AFFIRM'/'NEGATE' for short confirmations, else None.
@@ -251,7 +255,6 @@ class OpenAIClient:
         t_norm = " ".join(t_norm.split()).strip()
 
         # Step 3: repair common STT split-contractions (covers "that s correct")
-        # e.g. "that s" -> "thats", "it s" -> "its"
         t_norm = re.sub(r"\b(that|it|there|here)\s+s\b", r"\1s", t_norm)
 
         if not t_norm:
@@ -406,7 +409,6 @@ MENU_CONTEXT:
         msg = resp.choices[0].message
         raw_obj: Dict[str, Any] = {}
 
-        # Tool call path
         try:
             tool_calls = getattr(msg, "tool_calls", None) or []
             if not tool_calls:
