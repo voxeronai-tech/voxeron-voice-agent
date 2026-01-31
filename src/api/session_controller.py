@@ -10,7 +10,6 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
-
 from fastapi import WebSocket
 from .models.state import DisambiguationContext
 
@@ -28,6 +27,7 @@ from .policy import (
 )
 from .services.openai_client import OpenAIClient
 from .prompts import build_system_prompt
+from .import settings
 
 from .telemetry import get_telemetry_emitter
 from .telemetry.emitter import TelemetryContext
@@ -1715,7 +1715,32 @@ class SessionController:
             else f"Oké, dus dat is: {cart}. Klopt dat?",
         )
         return True
+    
+    async def _stt(self, pcm: bytes, stt_lang: str, *, prompt: str) -> str:
+        """
+        Canonical STT helper.
 
+        - Uses sample_rate from settings when supported (real OpenAI client)
+        - Gracefully falls back for FakeOpenAIClient used in tests
+        - Ensures we never silently drop transcripts due to TypeError
+        """
+        try:
+            return await self.oa.transcribe_pcm(
+                pcm,
+                stt_lang,
+                sample_rate=settings.AUDIO_SAMPLE_RATE,
+                prompt=prompt,
+            )
+        except TypeError as e:
+            # FakeOpenAIClient does not accept sample_rate
+            if "sample_rate" in str(e):
+                return await self.oa.transcribe_pcm(
+                    pcm,
+                    stt_lang,
+                    prompt=prompt,
+                )
+            raise
+    
     async def process_utterance(self, ws: WebSocket, pcm: bytes) -> None:
         st = self.state
         if st.is_processing:
@@ -1723,6 +1748,22 @@ class SessionController:
         st.is_processing = True
         st.turn_id += 1
 
+        if pcm is None:
+            pcm = b""
+
+        if settings.DEBUG_SEGMENTATION:
+            logger.info(
+                "PROC_UTTERANCE: pcm_bytes=%d tenant=%s phase=%s lang=%s pending_name=%s pending_fulfillment=%s pending_choice=%r oa_type=%s oa_mod=%s",
+                len(pcm),
+                st.tenant_ref,
+                getattr(st, "phase", None),
+                st.lang,
+                bool(getattr(st, "pending_name", False)),
+                bool(getattr(st, "pending_fulfillment", False)),
+                getattr(st, "pending_choice", None),
+                type(self.oa).__name__,
+                type(self.oa).__module__,
+            )
         try:
             await self.send_thinking(ws)
 
@@ -1737,48 +1778,35 @@ class SessionController:
             if st.pending_name:
                 try:
                     stt_lang = st.lang if st.lang in ("en", "nl") else "en"
-                    transcript = await self.oa.transcribe_pcm(pcm, stt_lang, prompt=NAME_STT_PROMPT)
+                    transcript = await self._stt(pcm, stt_lang, prompt=NAME_STT_PROMPT)
                 except Exception:
+                    if settings.DEBUG_SEGMENTATION:
+                        logger.exception(
+                            "STT failed (pending_name=%s pending_fulfillment=%s pending_choice=%r tenant=%s lang=%s)",
+                            bool(st.pending_name),
+                            bool(st.pending_fulfillment),
+                            st.pending_choice,
+                            st.tenant_ref,
+                            st.lang,
+                        )
                     transcript = ""
-
-            elif st.pending_fulfillment:
-                # Language lock: force STT language for fulfillment (prevents NL bleed when user speaks English).
-                stt_lang = st.lang if st.lang in ("en", "nl") else "en"
-                stt_prompt = FULFILLMENT_STT_PROMPT_NL if stt_lang == "nl" else FULFILLMENT_STT_PROMPT_EN
-
-                try:
-                    transcript = await self.oa.transcribe_pcm(pcm, stt_lang, prompt=stt_prompt)
-                except Exception:
-                    transcript = ""
-
-                # RC3: Fulfillment slot is STRICT.
-                # Only accept pickup/delivery. If STT drifts to generic "order" phrases,
-                # treat it as NO ANSWER so the slot stays active and we reprompt.
-                if transcript:
-                    tn = " " + norm_simple(transcript) + " "
-
-                    if re.search(r"\b(pickup|pick up|afhalen|afhaal)\b", tn):
-                        transcript = "pickup"
-                    elif re.search(r"\b(delivery|bezorgen|bezorging|thuisbezorg)\b", tn):
-                        transcript = "delivery"
-                    else:
-                        # Ignore common STT bias outputs in this slot.
-                        if re.search(
-                            r"\b(ik wil bestellen|bestellen|i want to order|want to order|place an order)\b",
-                            tn,
-                        ):
-                            transcript = ""
 
             elif st.pending_choice == "nan_variant":
                 candidates: List[Tuple[str, str]] = []  # (txt, label)
 
-                # Language lock: do NOT let STT auto-detect here (it causes Dutch bleed).
+                # Language lock: do NOT let STT auto-detect here (prevents Dutch bleed).
                 stt_lang = st.lang if st.lang in ("en", "nl") else "en"
-                stt_prompt = NAAN_VARIANT_STT_PROMPT_NL if stt_lang == "nl" else NAAN_VARIANT_STT_PROMPT_EN
+                stt_prompt = (
+                    NAAN_VARIANT_STT_PROMPT_NL
+                    if stt_lang == "nl"
+                    else NAAN_VARIANT_STT_PROMPT_EN
+                )
+
                 try:
-                    txt = await self.oa.transcribe_pcm(pcm, stt_lang, prompt=stt_prompt)
+                    txt = await self._stt(pcm, stt_lang, prompt=stt_prompt)
                     candidates.append(((txt or "").strip(), f"naan_{stt_lang}_forced"))
                 except Exception:
+                    # Best-effort: if STT fails here, fall through to empty transcript
                     pass
 
                 picked = ""
@@ -1786,57 +1814,64 @@ class SessionController:
                     if not cand:
                         continue
                     c = " " + norm_simple(cand) + " "
-                    if re.search(r"\b(plain|regular|normal|gewoon|standard|garlic|knoflook|cheese|kaas|keema|peshawari|klein|klijn|lamb|lam|lamsfilet|lams)\b", c):
+                    if re.search(
+                        r"\b(plain|regular|normal|gewoon|standard|garlic|knoflook|cheese|kaas|keema|peshawari|klein|klijn|lamb|lam|lamsfilet|lams)\b",
+                        c,
+                    ):
                         logger.info("STT(naan_pick=%s): %s", label, cand)
                         picked = cand
                         break
 
                 transcript = picked or (candidates[0][0] if candidates else "")
 
-            # 3) Normal speech: allow Taj multilingual STT; tenant prompt base allowed
+            # 3) Normal speech: allow tenant-scoped STT
             else:
-                stt_lang: Optional[str] = None
+                # -----------------------------
+                # Determine STT language
+                # -----------------------------
                 if st.tenant_ref == "taj_mahal":
                     stt_lang = "nl" if st.lang == "nl" else "en"
                 else:
-                    stt_lang = st.lang if st.lang in ("en", "nl", "tr") else None
+                    stt_lang = st.lang if st.lang in ("en", "nl", "tr") else "en"
 
-                stt_prompt = None
-                if self.tenant_stt_prompt_enabled and st.tenant_cfg and getattr(st.tenant_cfg, "stt_prompt_base", None):
-                    stt_prompt = str(st.tenant_cfg.stt_prompt_base)
+                # -----------------------------
+                # Determine tenant STT prompt
+                # -----------------------------
+                stt_prompt = ""
+                if (
+                    self.tenant_stt_prompt_enabled
+                    and st.tenant_cfg
+                    and getattr(st.tenant_cfg, "stt_prompt_base", None)
+                ):
+                    stt_prompt = str(st.tenant_cfg.stt_prompt_base or "").strip()
 
+                # -----------------------------
+                # DEBUG: prove STT is reached
+                # -----------------------------
+                if settings.DEBUG_SEGMENTATION:
+                    logger.info(
+                        "STT_PRECALL: path=normal_speech tenant=%s lang=%s stt_lang=%s prompt_set=%s pcm_bytes=%d",
+                        st.tenant_ref,
+                        st.lang,
+                        stt_lang,
+                        bool(stt_prompt),
+                        len(pcm or b""),
+                    )
+
+                # -----------------------------
+                # Call STT (canonical path)
+                # -----------------------------
                 try:
-                    transcript = await self.oa.transcribe_pcm(pcm, stt_lang, prompt=stt_prompt)
+                    transcript = await self._stt(pcm, stt_lang, prompt=stt_prompt)
                 except Exception:
+                    logger.exception(
+                        "STT failed (normal_speech tenant=%s lang=%s stt_lang=%s pcm_bytes=%d)",
+                        st.tenant_ref,
+                        st.lang,
+                        stt_lang,
+                        len(pcm or b""),
+                    )
                     transcript = ""
-
-            # Normalize transcript early
-            transcript = (transcript or "").strip()
-            now_ts = time.time()
-
-            # RC3: prevent Dutch bleed in EN sessions on Taj normal speech.
-            # If STT returns clear Dutch tokens while lang=en, retry with strict English lock + no tenant prompt.
-            if st.tenant_ref == "taj_mahal" and st.lang == "en" and transcript:
-                t_norm_chk = " " + norm_simple(transcript) + " "
-                dutch_hits = [
-                    " in plaats van ", " kan ik ", " ik wil ", " graag ",
-                    " bestelling ", " bestellen ",  # include verb form too
-                    " afhalen ", " bezorgen ", " prijs ", " totaal ",
-                    " twee ", " een ",
-                ]
-                if sum(1 for k in dutch_hits if k in t_norm_chk) >= 2:
-                    try:
-                        retry = await self.oa.transcribe_pcm(pcm, "en", prompt=None)
-                        retry = (retry or "").strip()
-                        if retry:
-                            logger.info(
-                                "RC3: STT dutch-bleed retry en_locked: before=%r after=%r",
-                                transcript,
-                                retry,
-                            )
-                            transcript = retry
-                    except Exception:
-                        pass
 
             # RC: silent hold for split utterances like "I want two ... [pause] ... butter chicken"
             # Prevents barge-in when user hasn't finished the sentence.
@@ -2141,7 +2176,6 @@ class SessionController:
                 bye = "Thanks for your order. Goodbye!" if st.lang != "nl" else "Bedankt voor je bestelling. Tot ziens!"
                 await self._speak(ws, bye)
                 return
-
 
             # ==========================================================
             # 1) Global intent guard (Intent-First)
@@ -2472,7 +2506,7 @@ class SessionController:
                     )
                 return
 
-                        # ==========================================================
+            # ==========================================================
             # 5b) Checkout confirmation (post-slots, pre-ordering/LLM)
             # ==========================================================
             if st.order_finalized:
