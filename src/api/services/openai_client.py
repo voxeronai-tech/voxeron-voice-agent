@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 from openai import AsyncOpenAI
+from .. import settings
 
 from .audio import pcm16_to_wav
 

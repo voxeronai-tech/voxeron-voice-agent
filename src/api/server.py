@@ -57,9 +57,17 @@ logger = logging.getLogger("taj-agent")
 async def lifespan(app: FastAPI):
     global menu_store
 
+    logger.info("[startup] SessionController version=%s", SESSION_CONTROLLER_VERSION)
     logger.info(
-        "[startup] SessionController version=%s",
-        SESSION_CONTROLLER_VERSION,
+        "[audio_cfg] sr=%s frame_ms=%s energy_floor=%s confirm_frames=%s min_utt_ms=%s silence_end_ms=%s preroll_ms=%s startup_ignore_sec=%s",
+        settings.AUDIO_SAMPLE_RATE,
+        settings.AUDIO_FRAME_MS,
+        settings.ENERGY_FLOOR,
+        settings.SPEECH_CONFIRM_FRAMES,
+        settings.MIN_UTTERANCE_MS,
+        settings.SILENCE_END_MS,
+        settings.VAD_PREROLL_MS,
+        settings.STARTUP_IGNORE_SEC,
     )
 
     db_url = (settings.DATABASE_URL or "").strip()
@@ -69,6 +77,7 @@ async def lifespan(app: FastAPI):
         logger.warning("OPENAI_API_KEY missing; STT/TTS/LLM calls will fail.")
 
     # ---- optional MenuStore (must never block startup) ----
+    menu_store = None
     if db_url:
         try:
             menu_store = MenuStore(
@@ -79,15 +88,11 @@ async def lifespan(app: FastAPI):
             await menu_store.start()
             logger.info("MenuStore started")
         except Exception:
-            logger.exception(
-                "MenuStore failed to start; continuing without DB-backed menu"
-            )
+            logger.exception("MenuStore failed to start; continuing without DB-backed menu")
             menu_store = None
     else:
         logger.warning("DATABASE_URL missing; MenuStore disabled.")
-        menu_store = None
 
-    # ---- application runs here ----
     try:
         yield
     finally:

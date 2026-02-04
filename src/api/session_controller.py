@@ -24,6 +24,13 @@ from .policy import (
     system_guard_for_llm,
 )
 from .services.openai_client import OpenAIClient
+
+# Optional (RC3): Cognitive Orchestrator (safe import)
+try:
+    from .orchestrator.orchestrator import CognitiveOrchestrator, OrchestratorRoute
+except Exception:  # pragma: no cover
+    CognitiveOrchestrator = None  # type: ignore
+    OrchestratorRoute = None  # type: ignore
 from .telemetry.emitter import TelemetryEmitter, TelemetryContext
 
 logger = logging.getLogger("taj-agent")
@@ -813,40 +820,50 @@ class SessionController:
             # ----------------------------------------------------------
             transcript = ""
 
-            # 1) Name capture: primary pass with NAME prompt (no tenant base prompt)
-            if st.pending_name:
+            async def _stt(pcm: bytes, lang: Optional[str], prompt: Optional[str], tag: str) -> str:
+                pcm_bytes = len(pcm or b"")
                 try:
-                    transcript = await self.oa.transcribe_pcm(pcm, None, prompt=NAME_STT_PROMPT)
+                    logger.info(
+                        "STT_CALL_SITE tag=%s bytes=%s lang=%s prompt_len=%s",
+                        tag,
+                        pcm_bytes,
+                        lang or "",
+                        len(prompt or ""),
+                    )
                 except Exception:
-                    transcript = ""
+                    pass
 
-            # 2) Fulfillment capture: primary pass with fulfillment prompt(s)
+                try:
+                    txt = await asyncio.wait_for(
+                        self.oa.transcribe_pcm(pcm, lang, prompt=prompt, debug_tag="controller"),
+                        timeout=20.0,
+                    )
+                    txt = (txt or "").strip()
+                    try:
+                        logger.info("STT_RESULT_SITE tag=%s len=%s text=%r", tag, len(txt), txt[:120])
+                    except Exception:
+                        pass
+                    return txt
+                except Exception as e:
+                    logger.exception("STT_ERROR tag=%s err=%s", tag, e)
+                    return ""
+
+            # 1) Name capture: NAME prompt only (no tenant base prompt)
+            if st.pending_name:
+                transcript = await _stt(pcm, None, NAME_STT_PROMPT, "name")
+
+            # 2) Fulfillment capture: try multiple prompts and pick one that parses
             elif st.pending_fulfillment:
-                # We do NOT trust the tenant base prompt here. We try EN and NL prompts and pick the one that parses.
                 candidates: List[Tuple[str, str]] = []  # (txt, label)
-                try:
-                    txt = await self.oa.transcribe_pcm(pcm, None, prompt=FULFILLMENT_STT_PROMPT_EN)
-                    candidates.append(((txt or "").strip(), "fulfill_en_any"))
-                except Exception:
-                    pass
-                try:
-                    txt = await self.oa.transcribe_pcm(pcm, "en", prompt=FULFILLMENT_STT_PROMPT_EN)
-                    candidates.append(((txt or "").strip(), "fulfill_en_forced"))
-                except Exception:
-                    pass
-                try:
-                    txt = await self.oa.transcribe_pcm(pcm, None, prompt=FULFILLMENT_STT_PROMPT_NL)
-                    candidates.append(((txt or "").strip(), "fulfill_nl_any"))
-                except Exception:
-                    pass
-                try:
-                    txt = await self.oa.transcribe_pcm(pcm, "nl", prompt=FULFILLMENT_STT_PROMPT_NL)
-                    candidates.append(((txt or "").strip(), "fulfill_nl_forced"))
-                except Exception:
-                    pass
+
+                candidates.append((await _stt(pcm, None, FULFILLMENT_STT_PROMPT_EN, "fulfill_en_any"), "fulfill_en_any"))
+                candidates.append((await _stt(pcm, "en", FULFILLMENT_STT_PROMPT_EN, "fulfill_en_forced"), "fulfill_en_forced"))
+                candidates.append((await _stt(pcm, None, FULFILLMENT_STT_PROMPT_NL, "fulfill_nl_any"), "fulfill_nl_any"))
+                candidates.append((await _stt(pcm, "nl", FULFILLMENT_STT_PROMPT_NL, "fulfill_nl_forced"), "fulfill_nl_forced"))
 
                 picked = ""
                 for txt, label in candidates:
+                    txt = (txt or "").strip()
                     if not txt:
                         continue
                     mode = self._parse_fulfillment(txt)
@@ -857,23 +874,23 @@ class SessionController:
 
                 transcript = picked or (candidates[0][0] if candidates else "")
 
-            # 3) Normal speech: allow Taj multilingual STT; tenant prompt base allowed
+            # 3) Normal speech: Taj multilingual STT; tenant prompt base allowed
             else:
-                # Taj: multilingual STT unless explicit NL output selected
                 stt_lang: Optional[str] = None
                 if st.tenant_ref == "taj_mahal":
                     stt_lang = "nl" if st.lang == "nl" else None
                 else:
                     stt_lang = st.lang if st.lang in ("en", "nl", "tr") else None
 
-                stt_prompt = None
-                if self.tenant_stt_prompt_enabled and st.tenant_cfg and getattr(st.tenant_cfg, "stt_prompt_base", None):
+                stt_prompt: Optional[str] = None
+                if (
+                    self.tenant_stt_prompt_enabled
+                    and st.tenant_cfg
+                    and getattr(st.tenant_cfg, "stt_prompt_base", None)
+                ):
                     stt_prompt = str(st.tenant_cfg.stt_prompt_base)
 
-                try:
-                    transcript = await self.oa.transcribe_pcm(pcm, stt_lang, prompt=stt_prompt)
-                except Exception:
-                    transcript = ""
+                transcript = await _stt(pcm, stt_lang, stt_prompt, "normal")
 
             if not transcript or not transcript.strip():
                 await self.clear_thinking(ws)
