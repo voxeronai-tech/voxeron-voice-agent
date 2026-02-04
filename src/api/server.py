@@ -68,6 +68,21 @@ async def lifespan(app: FastAPI):
     if not settings.OPENAI_API_KEY:
         logger.warning("OPENAI_API_KEY missing; STT/TTS/LLM calls will fail.")
 
+    # ---- audio / VAD configuration (authoritative at runtime) ----
+    logger.info(
+        "[audio_cfg] frame_ms=%s energy_floor=%s speech_confirm_frames=%s "
+        "min_utterance_ms=%s silence_end_ms=%s barge_in_rms=%s "
+        "pause_merge_sec=%s pause_merge_sec_fragment=%s",
+        settings.AUDIO_FRAME_MS,
+        settings.ENERGY_FLOOR,
+        settings.SPEECH_CONFIRM_FRAMES,
+        settings.MIN_UTTERANCE_MS,
+        settings.SILENCE_END_MS,
+        settings.BARGE_IN_RMS,
+        settings.PAUSE_MERGE_SEC,
+        settings.PAUSE_MERGE_SEC_FRAGMENT,
+    )
+
     # ---- optional MenuStore (must never block startup) ----
     if db_url:
         try:
