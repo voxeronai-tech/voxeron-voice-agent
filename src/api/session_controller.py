@@ -7,6 +7,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+from turtle import st
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import WebSocket
@@ -894,7 +895,7 @@ class SessionController:
 
             # ==========================================================
             # 1) Global intent guard (Intent-First)
-            # IMPORTANT FIX:
+            # IMPORTANT:
             # - do NOT clear pending_fulfillment / pending_name based on possibly-biased STT
             # - only clear slots when we're NOT currently slot-filling
             # ==========================================================
@@ -910,12 +911,17 @@ class SessionController:
                     )
                 st.pending_name = False
                 st.pending_fulfillment = False
+
             elif is_ordering_intent and (st.pending_fulfillment or st.pending_name):
                 logger.info(
-                    "[v0.7.1] Global Guard: ordering intent seen during slot-fill; IGNORE (pending_name=%s pending_fulfillment=%s)",
+                    "[v0.7.7] Global Guard: ordering intent seen during slot-fill; ROUTE TO ORDERING (pending_name=%s pending_fulfillment=%s)",
                     st.pending_name,
                     st.pending_fulfillment,
                 )
+                # IMPORTANT:
+                # Do NOT clear pending_fulfillment/pending_name here.
+                # Do NOT return; ordering logic below should handle this transcript.
+                pass
 
             # ==========================================================
             # 2) Language command handling (Taj explicit only)
@@ -982,8 +988,9 @@ class SessionController:
             # ==========================================================
             # 5) Slot handling (Intent-aware, non-greedy)
             # ==========================================================
-            # Fulfillment slot (now robust against 'bestellen' hallucination)
-            if st.pending_fulfillment:
+            # Fulfillment slot (intent-aware, non-greedy)
+            if st.pending_fulfillment and not is_ordering_intent:
+
                 if self._is_obvious_out_of_scope(transcript):
                     await self.clear_thinking(ws)
                     await self._speak(ws, "I can help with the order — is this for pickup or delivery?")
