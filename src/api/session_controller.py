@@ -26,6 +26,13 @@ from .policy import (
 from .services.openai_client import OpenAIClient
 from .telemetry.emitter import TelemetryEmitter, TelemetryContext
 
+# Orchestrator is optional; never crash if it is unavailable.
+try:
+    from .orchestrator import CognitiveOrchestrator, OrchestratorRoute
+except Exception:
+    CognitiveOrchestrator = None  # type: ignore
+    OrchestratorRoute = None      # type: ignore
+
 logger = logging.getLogger("taj-agent")
 
 
@@ -798,6 +805,10 @@ class SessionController:
 
     async def process_utterance(self, ws: WebSocket, pcm: bytes) -> None:
         st = self.state
+        logger.info("[proc_utt] start bytes=%s pending_name=%s pending_fulfillment=%s phase=%s",
+            0 if pcm is None else len(pcm),
+            st.pending_name, st.pending_fulfillment, st.phase)
+
         if st.is_processing:
             return
         st.is_processing = True
@@ -970,7 +981,12 @@ class SessionController:
                     st.phase = "chat"
                     await self._speak(ws, "Alphabouwtechniek. Wat is er aan de hand?")
                     return
-
+                
+                logger.info(
+                    "[proc_utt] transcript_len=%s text=%r",
+                    len(transcript or ""),
+                    (transcript or "")[:80],
+                )
             # ==========================================================
             # 4) Deterministic prompt-dump filter
             # ==========================================================
