@@ -26,6 +26,13 @@ from .policy import (
 from .services.openai_client import OpenAIClient
 from .telemetry.emitter import TelemetryEmitter, TelemetryContext
 
+# Orchestrator is optional; never crash if it is unavailable.
+try:
+    from .orchestrator import CognitiveOrchestrator, OrchestratorRoute
+except Exception:
+    CognitiveOrchestrator = None  # type: ignore
+    OrchestratorRoute = None      # type: ignore
+
 logger = logging.getLogger("taj-agent")
 
 
@@ -798,6 +805,10 @@ class SessionController:
 
     async def process_utterance(self, ws: WebSocket, pcm: bytes) -> None:
         st = self.state
+        logger.info("[proc_utt] start bytes=%s pending_name=%s pending_fulfillment=%s phase=%s",
+            0 if pcm is None else len(pcm),
+            st.pending_name, st.pending_fulfillment, st.phase)
+
         if st.is_processing:
             return
         st.is_processing = True
@@ -806,42 +817,92 @@ class SessionController:
         try:
             await self.send_thinking(ws)
 
-            # ----------------------------------------------------------
+             # ----------------------------------------------------------
             # STT MODE SELECTION (critical fix)
             # If we're slot-filling, do NOT use tenant stt_prompt_base.
             # Use dedicated prompts to avoid "bestellen" bias.
             # ----------------------------------------------------------
             transcript = ""
 
+            def _stt_call_log(tag: str, pcm_bytes: int, lang: Optional[str], prompt: Optional[str]) -> None:
+                try:
+                    logger.info(
+                        "STT_CALL_SITE tag=%s bytes=%s lang=%s prompt_len=%s",
+                        tag,
+                        pcm_bytes,
+                        lang or "",
+                        len(prompt or ""),
+                    )
+                except Exception:
+                    pass
+
+            def _stt_result_log(tag: str, text: str) -> None:
+                try:
+                    t = (text or "").strip()
+                    logger.info("STT_RESULT_SITE tag=%s len=%s text=%r", tag, len(t), t[:120])
+                except Exception:
+                    pass
+
+            pcm_bytes = len(pcm or b"")
+
             # 1) Name capture: primary pass with NAME prompt (no tenant base prompt)
             if st.pending_name:
                 try:
-                    transcript = await self.oa.transcribe_pcm(pcm, None, prompt=NAME_STT_PROMPT)
+                    _stt_call_log("name", pcm_bytes, None, NAME_STT_PROMPT)
+                    transcript = await self.oa.transcribe_pcm(
+                        pcm, None, prompt=NAME_STT_PROMPT, debug_tag="controller"
+                    )
+                    _stt_result_log("name", transcript)
                 except Exception:
                     transcript = ""
 
             # 2) Fulfillment capture: primary pass with fulfillment prompt(s)
             elif st.pending_fulfillment:
-                # We do NOT trust the tenant base prompt here. We try EN and NL prompts and pick the one that parses.
+                # We do NOT trust the tenant base prompt here.
+                # We try EN and NL prompts and pick the one that parses.
                 candidates: List[Tuple[str, str]] = []  # (txt, label)
+
                 try:
-                    txt = await self.oa.transcribe_pcm(pcm, None, prompt=FULFILLMENT_STT_PROMPT_EN)
-                    candidates.append(((txt or "").strip(), "fulfill_en_any"))
+                    _stt_call_log("fulfill_en_any", pcm_bytes, None, FULFILLMENT_STT_PROMPT_EN)
+                    txt = await self.oa.transcribe_pcm(
+                        pcm, None, prompt=FULFILLMENT_STT_PROMPT_EN, debug_tag="controller"
+                    )
+                    txt = (txt or "").strip()
+                    _stt_result_log("fulfill_en_any", txt)
+                    candidates.append((txt, "fulfill_en_any"))
                 except Exception:
                     pass
+
                 try:
-                    txt = await self.oa.transcribe_pcm(pcm, "en", prompt=FULFILLMENT_STT_PROMPT_EN)
-                    candidates.append(((txt or "").strip(), "fulfill_en_forced"))
+                    _stt_call_log("fulfill_en_forced", pcm_bytes, "en", FULFILLMENT_STT_PROMPT_EN)
+                    txt = await self.oa.transcribe_pcm(
+                        pcm, "en", prompt=FULFILLMENT_STT_PROMPT_EN, debug_tag="controller"
+                    )
+                    txt = (txt or "").strip()
+                    _stt_result_log("fulfill_en_forced", txt)
+                    candidates.append((txt, "fulfill_en_forced"))
                 except Exception:
                     pass
+
                 try:
-                    txt = await self.oa.transcribe_pcm(pcm, None, prompt=FULFILLMENT_STT_PROMPT_NL)
-                    candidates.append(((txt or "").strip(), "fulfill_nl_any"))
+                    _stt_call_log("fulfill_nl_any", pcm_bytes, None, FULFILLMENT_STT_PROMPT_NL)
+                    txt = await self.oa.transcribe_pcm(
+                        pcm, None, prompt=FULFILLMENT_STT_PROMPT_NL, debug_tag="controller"
+                    )
+                    txt = (txt or "").strip()
+                    _stt_result_log("fulfill_nl_any", txt)
+                    candidates.append((txt, "fulfill_nl_any"))
                 except Exception:
                     pass
+
                 try:
-                    txt = await self.oa.transcribe_pcm(pcm, "nl", prompt=FULFILLMENT_STT_PROMPT_NL)
-                    candidates.append(((txt or "").strip(), "fulfill_nl_forced"))
+                    _stt_call_log("fulfill_nl_forced", pcm_bytes, "nl", FULFILLMENT_STT_PROMPT_NL)
+                    txt = await self.oa.transcribe_pcm(
+                        pcm, "nl", prompt=FULFILLMENT_STT_PROMPT_NL, debug_tag="controller"
+                    )
+                    txt = (txt or "").strip()
+                    _stt_result_log("fulfill_nl_forced", txt)
+                    candidates.append((txt, "fulfill_nl_forced"))
                 except Exception:
                     pass
 
@@ -859,19 +920,27 @@ class SessionController:
 
             # 3) Normal speech: allow Taj multilingual STT; tenant prompt base allowed
             else:
-                # Taj: multilingual STT unless explicit NL output selected
+                # Taj: multilingual STT unless explicit NL selected
                 stt_lang: Optional[str] = None
                 if st.tenant_ref == "taj_mahal":
                     stt_lang = "nl" if st.lang == "nl" else None
                 else:
                     stt_lang = st.lang if st.lang in ("en", "nl", "tr") else None
 
-                stt_prompt = None
-                if self.tenant_stt_prompt_enabled and st.tenant_cfg and getattr(st.tenant_cfg, "stt_prompt_base", None):
+                stt_prompt: Optional[str] = None
+                if (
+                    self.tenant_stt_prompt_enabled
+                    and st.tenant_cfg
+                    and getattr(st.tenant_cfg, "stt_prompt_base", None)
+                ):
                     stt_prompt = str(st.tenant_cfg.stt_prompt_base)
 
                 try:
-                    transcript = await self.oa.transcribe_pcm(pcm, stt_lang, prompt=stt_prompt)
+                    _stt_call_log("normal", pcm_bytes, stt_lang, stt_prompt)
+                    transcript = await self.oa.transcribe_pcm(
+                        pcm, stt_lang, prompt=stt_prompt, debug_tag="controller"
+                    )
+                    _stt_result_log("normal", transcript)
                 except Exception:
                     transcript = ""
 
@@ -894,7 +963,7 @@ class SessionController:
 
             # ==========================================================
             # 1) Global intent guard (Intent-First)
-            # IMPORTANT FIX:
+            # IMPORTANT:
             # - do NOT clear pending_fulfillment / pending_name based on possibly-biased STT
             # - only clear slots when we're NOT currently slot-filling
             # ==========================================================
@@ -910,12 +979,17 @@ class SessionController:
                     )
                 st.pending_name = False
                 st.pending_fulfillment = False
+
             elif is_ordering_intent and (st.pending_fulfillment or st.pending_name):
                 logger.info(
-                    "[v0.7.1] Global Guard: ordering intent seen during slot-fill; IGNORE (pending_name=%s pending_fulfillment=%s)",
+                    "[v0.7.7] Global Guard: ordering intent seen during slot-fill; ROUTE TO ORDERING (pending_name=%s pending_fulfillment=%s)",
                     st.pending_name,
                     st.pending_fulfillment,
                 )
+                # IMPORTANT:
+                # Do NOT clear pending_fulfillment/pending_name here.
+                # Do NOT return; ordering logic below should handle this transcript.
+                pass
 
             # ==========================================================
             # 2) Language command handling (Taj explicit only)
@@ -965,7 +1039,12 @@ class SessionController:
                     st.phase = "chat"
                     await self._speak(ws, "Alphabouwtechniek. Wat is er aan de hand?")
                     return
-
+                
+                logger.info(
+                    "[proc_utt] transcript_len=%s text=%r",
+                    len(transcript or ""),
+                    (transcript or "")[:80],
+                )
             # ==========================================================
             # 4) Deterministic prompt-dump filter
             # ==========================================================
@@ -982,8 +1061,9 @@ class SessionController:
             # ==========================================================
             # 5) Slot handling (Intent-aware, non-greedy)
             # ==========================================================
-            # Fulfillment slot (now robust against 'bestellen' hallucination)
-            if st.pending_fulfillment:
+            # Fulfillment slot (intent-aware, non-greedy)
+            if st.pending_fulfillment and not is_ordering_intent:
+
                 if self._is_obvious_out_of_scope(transcript):
                     await self.clear_thinking(ws)
                     await self._speak(ws, "I can help with the order — is this for pickup or delivery?")
