@@ -537,11 +537,14 @@ async def _handle_ws(ws: WebSocket) -> None:
                 pending_utter = None
                 pending_deadline_ts = 0.0
 
+                # If a processing task is running, do NOT cancel it.
+                # Re-arm the deadline slightly and keep buffering until processing completes.
                 if state.proc_task and not state.proc_task.done():
-                    try:
-                        state.proc_task.cancel()
-                    except Exception:
-                        pass
+                    pending_utter = utter_to_process  # keep it (or append back)
+                    pending_deadline_ts = time.time() + 0.5
+                    if settings.DEBUG_SEGMENTATION:
+                        logger.info("SEGMENT HOLD: proc_task running; delaying dispatch (pending_bytes=%d)", len(pending_utter))
+                    continue
 
                 if settings.DEBUG_SEGMENTATION:
                     logger.info("SEGMENT DISPATCH: bytes=%s", len(utter_to_process))
