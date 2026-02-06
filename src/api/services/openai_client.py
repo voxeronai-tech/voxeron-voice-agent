@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional
 import httpx
 from openai import AsyncOpenAI
 
+from .. import settings
+
 from .audio import pcm16_to_wav
 
 logger = logging.getLogger("taj-agent")
@@ -84,6 +86,13 @@ def _clamp_float(x: Any, lo: float, hi: float, default: float) -> float:
 def _safe_json_loads(s: Any) -> Optional[Dict[str, Any]]:
     if not s:
         return None
+    if isinstance(s, dict):
+        return s
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
 
 
 def _norm_lang(lang: Optional[str]) -> Optional[str]:
@@ -96,14 +105,6 @@ def _norm_lang(lang: Optional[str]) -> Optional[str]:
     if len(l) > 16:
         return None
     return l
-    if isinstance(s, dict):
-        return s
-    try:
-        obj = json.loads(s)
-        return obj if isinstance(obj, dict) else None
-    except Exception:
-        return None
-
 
 class OpenAIClient:
     def __init__(
@@ -192,21 +193,6 @@ class OpenAIClient:
                 pass
 
         return text
-
-        wav_bytes = pcm16_to_wav(pcm16, self.sample_rate)
-        f = io.BytesIO(wav_bytes)
-        f.name = "audio.wav"
-
-        kwargs: Dict[str, Any] = {"model": self.stt_model, "file": f}
-
-        if prompt:
-            kwargs["prompt"] = str(prompt)
-
-        if lang in ("en", "nl", "hi"):
-            kwargs["language"] = lang
-
-        resp = await self.sdk.audio.transcriptions.create(**kwargs)
-        return (getattr(resp, "text", "") or "").strip()
 
     # -------------------------
     # Chat (freeform)
