@@ -1058,11 +1058,22 @@ class SessionController:
                 await self._speak(ws, msg)
                 return
 
+            # Treat quantity-bearing utterances as ordering, even if global intent missed it.
+            tnorm = " " + norm_simple(transcript) + " "
+            looks_like_order_payload = any(
+                x in tnorm
+                for x in (
+                    " one ", " two ", " three ", " four ", " five ", " six ", " seven ", " eight ", " nine ", " ten ",
+                    " 1 ", " 2 ", " 3 ", " 4 ", " 5 ", " 6 ", " 7 ", " 8 ", " 9 ",
+                    " een ", " twee ", " drie ", " vier ", " vijf ", " zes ", " zeven ", " acht ", " negen ", " tien ",
+                )
+            )
+
             # ==========================================================
             # 5) Slot handling (Intent-aware, non-greedy)
             # ==========================================================
             # Fulfillment slot (intent-aware, non-greedy)
-            if st.pending_fulfillment and not is_ordering_intent:
+            if st.pending_fulfillment and not (is_ordering_intent or looks_like_order_payload):
 
                 if self._is_obvious_out_of_scope(transcript):
                     await self.clear_thinking(ws)
