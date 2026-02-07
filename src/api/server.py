@@ -530,20 +530,27 @@ async def _handle_ws(ws: WebSocket) -> None:
             if pending_utter is not None and time.time() >= pending_deadline_ts:
                 tnow = time.time()
                 state.last_activity_ts = tnow
-                setattr(state, "last_user_utter_end_ts", tnow)
+
+                # If a processing task is running, do NOT dispatch.
+                # Keep buffering and re-arm a normal grace window from now (prevents rapid re-flush/double-dispatch).
+                if state.proc_task and not state.proc_task.done():
+                    pending_deadline_ts = tnow + settings.PAUSE_MERGE_SEC
+                    if settings.DEBUG_SEGMENTATION:
+                        logger.info(
+                            "SEGMENT HOLD: proc_task running; delaying dispatch (pending_bytes=%d)",
+                            len(pending_utter) if pending_utter else 0,
+                        )
+                    continue
 
                 # Snapshot bytes BEFORE clearing, so we never accidentally pass None/empty
                 utter_to_process = pending_utter
                 pending_utter = None
                 pending_deadline_ts = 0.0
+                setattr(state, "last_user_utter_end_ts", tnow)
 
-                # If a processing task is running, do NOT cancel it.
-                # Re-arm the deadline slightly and keep buffering until processing completes.
-                if state.proc_task and not state.proc_task.done():
-                    pending_utter = utter_to_process  # keep it (or append back)
-                    pending_deadline_ts = time.time() + 0.5
+                if not utter_to_process:
                     if settings.DEBUG_SEGMENTATION:
-                        logger.info("SEGMENT HOLD: proc_task running; delaying dispatch (pending_bytes=%d)", len(pending_utter))
+                        logger.debug("SEGMENT DISPATCH: skipped empty utterance")
                     continue
 
                 if settings.DEBUG_SEGMENTATION:
