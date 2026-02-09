@@ -1007,10 +1007,9 @@ class SessionController:
                 variant = extract_naan_variant_keyword_scoped(transcript)
                 has_variant = bool(variant)
 
-                naan_opts = self._naan_options_from_menu(st.menu)
                 logger.info(
-                    "naan_check mentions_nan=%s has_variant=%s variant=%s naan_opts=%d opts=%s",
-                    mentions_nan, has_variant, variant, len(naan_opts), [x[0] for x in naan_opts[:5]],
+                    "naan_check mentions_nan=%s has_variant=%s variant=%s",
+                    mentions_nan, has_variant, variant,
                 )
 
                 if mentions_nan and (not has_variant):
