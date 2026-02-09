@@ -245,3 +245,121 @@ def suggest_substitution(
     # Protein-only, no spice preference: avoid overly confident picks
     ranked = sorted(candidates, key=lambda x: (len(x), x))
     return ranked[0], max(0.0, safe_fail_threshold - 0.05), "fallback:protein-only"
+
+# -----------------------------------------------------------------------------
+# Naan helpers (tenant-agnostic, menu-aware)
+# -----------------------------------------------------------------------------
+_NAAN_WORDS: Tuple[str, ...] = ("naan", "nan", "naam")
+
+
+def is_naan_item(menu: MenuSnapshot, item_id: str) -> bool:
+    if not menu or not item_id:
+        return False
+    dn = (menu.display_name(item_id) or "").lower()
+    return any(w in dn for w in _NAAN_WORDS)
+
+
+def naan_options_from_menu(menu: MenuSnapshot) -> List[Tuple[str, str]]:
+    """
+    Return [(label, item_id)] sorted with plain/garlic first when available.
+    """
+    if not menu:
+        return []
+
+    items: List[Tuple[str, str]] = []
+    for _name, iid in menu.name_choices:
+        if not is_naan_item(menu, iid):
+            continue
+        label = (menu.display_name(iid) or "").strip()
+        if label:
+            items.append((label, iid))
+
+    if not items:
+        return []
+
+    prefs: List[Tuple[str, Tuple[str, ...]]] = [
+        ("plain", ("naan", "nan", "plain", "regular", "normal", "gewoon", "normaal", "standaard")),
+        ("garlic", ("garlic", "knoflook")),
+        ("butter", ("butter", "boter")),
+        ("cheese", ("cheese", "kaas")),
+        ("keema", ("keema", "kheema")),
+        ("peshawari", ("peshawari",)),
+    ]
+
+    def score(label: str) -> int:
+        ll = label.lower().strip()
+        if ll in {"nan", "naan"}:
+            return 200
+        for i, (_k, toks) in enumerate(prefs):
+            if any(t in ll for t in toks):
+                return 150 - i
+        return 0
+
+    items.sort(key=lambda x: (score(x[0]), -len(x[0])), reverse=True)
+    return items
+
+
+def naan_optima_prompt(menu: Optional[MenuSnapshot], lang: str, *, list_mode: str = "short", with_main: Optional[str] = None) -> str:
+    """
+    Minimal Optima-style prompt, optionally using real menu labels when available.
+    """
+    lang_n = (lang or "en").lower()
+    max_n = 2 if list_mode == "short" else 4
+
+    opts = naan_options_from_menu(menu) if menu else []
+    labels = [x[0] for x in opts[:max_n]]
+
+    if not labels:
+        if lang_n == "nl":
+            return f"Zeker. Wil je gewone naan of garlic naan?" if not with_main else f"Zeker. Wil je gewone naan of garlic naan bij je {with_main}?"
+        return f"Certainly. Would you like plain naan or garlic naan?" if not with_main else f"Certainly. Would you like plain naan or garlic naan with your {with_main}?"
+
+    if lang_n == "nl":
+        if len(labels) >= 2:
+            return f"Wil je {labels[0]} of {labels[1]}?"
+        return f"We hebben {labels[0]}. Wil je die?"
+    else:
+        if len(labels) >= 2:
+            return f"Would you like {labels[0]} or {labels[1]}?"
+        return f"We have {labels[0]}. Would you like that?"
+
+
+def find_naan_item_for_variant(menu: Optional[MenuSnapshot], variant: str) -> Optional[str]:
+    """
+    Map a variant keyword (plain/garlic/cheese/...) to the best matching naan item_id in the menu.
+    """
+    if not menu or not variant:
+        return None
+
+    v = variant.strip().lower()
+    opts = naan_options_from_menu(menu)
+    if not opts:
+        return None
+
+    variant_tokens = {
+        "plain": ("naan", "nan", "plain", "regular", "normal", "gewoon", "normaal", "standaard"),
+        "garlic": ("garlic", "knoflook"),
+        "butter": ("butter", "boter"),
+        "cheese": ("cheese", "kaas"),
+        "keema": ("keema", "kheema"),
+        "peshawari": ("peshawari",),
+    }
+
+    toks = variant_tokens.get(v, (v,))
+    best_iid: Optional[str] = None
+    best_score = -1
+
+    for label, iid in opts:
+        ll = label.lower().strip()
+        s = 0
+        if v == "plain" and ll in {"nan", "naan"}:
+            s += 50
+        if any(t in ll for t in toks):
+            s += 25
+        if v in ll:
+            s += 8
+        if s > best_score:
+            best_score = s
+            best_iid = iid
+
+    return best_iid if best_score >= 0 else None

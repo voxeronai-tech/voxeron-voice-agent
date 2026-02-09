@@ -18,6 +18,7 @@ from .intent import (
     detect_explicit_remove_intent,
 )
 from .menu_store import MenuSnapshot, MenuStore
+from .menu_knowledge import extract_naan_variant_keyword_scoped, is_naan_item, naan_optima_prompt, find_naan_item_for_variant
 from .tenant_manager import TenantManager, TenantConfig
 from .policy import (
     SessionPolicyState,
@@ -285,56 +286,6 @@ async def llm_turn(oa: OpenAIClient, state: SessionState, user_text: str, menu_c
     return obj if obj else {"reply": txt, "add": [], "remove": []}
 
 
-# -------------------------
-# Naan keyword parsing (SCOPED)
-# -------------------------
-_NAAN_TOKENS = {"naan", "nan", "naam"}
-_PLAIN_LIKE = {
-    "plain", "regular", "normal", "gewoon", "normaal", "standaard",
-    "plainer", "plainar", "planar", "plano", "playn", "plean",
-}
-_VARIANT_TOKS = {
-    "garlic": {"garlic", "knoflook"},
-    "butter": {"butter", "boter"},
-    "cheese": {"cheese", "kaas"},
-    "keema": {"keema", "kheema"},
-    "peshawari": {"peshawari"},
-}
-
-
-def _extract_nan_variant_keyword_scoped(text: str) -> Optional[str]:
-    t = norm_simple(text)
-    if not t:
-        return None
-    toks = t.split()
-    naan_idxs = [i for i, tok in enumerate(toks) if tok in _NAAN_TOKENS]
-    if not naan_idxs:
-        return None
-
-    def window(i: int, r: int = 3) -> List[str]:
-        lo = max(0, i - r)
-        hi = min(len(toks), i + r + 1)
-        return toks[lo:hi]
-
-    for idx in naan_idxs:
-        w = window(idx, 3)
-        if any(tok in _PLAIN_LIKE for tok in w):
-            return "plain"
-
-    for idx in naan_idxs:
-        w = set(window(idx, 3))
-        for canonical, variants in _VARIANT_TOKS.items():
-            if w.intersection(variants):
-                return canonical
-
-    joined = " " + " ".join(toks) + " "
-    for canonical, variants in _VARIANT_TOKS.items():
-        for v in variants:
-            if f" {v} naan " in joined or f" naan {v} " in joined or f" {v} nan " in joined or f" nan {v} " in joined:
-                return canonical
-
-    return None
-
 
 class SessionController:
     def __init__(
@@ -462,119 +413,9 @@ class SessionController:
     # -------------------------
     # Menu helpers
     # -------------------------
-    def _is_nan_item(self, menu: MenuSnapshot, item_id: str) -> bool:
-        dn = (menu.display_name(item_id) or "").lower()
-        return ("naan" in dn) or ("nan" in dn) or ("naam" in dn)
 
-    def _naan_options_from_menu(self, menu: MenuSnapshot) -> List[Tuple[str, str]]:
-        if not menu:
-            return []
-        items: List[Tuple[str, str]] = []
-        for _name, iid in menu.name_choices:
-            if not self._is_nan_item(menu, iid):
-                continue
-            label = (menu.display_name(iid) or "").strip()
-            if label:
-                items.append((label, iid))
-        if not items:
-            return []
 
-        prefs = [
-            ("garlic", ["garlic", "knoflook"]),
-            ("plain", ["naan", "nan", "plain", "regular", "normal", "gewoon", "standaard"]),
-            ("butter", ["butter", "boter"]),
-            ("cheese", ["cheese", "kaas"]),
-            ("keema", ["keema", "kheema"]),
-            ("peshawari", ["peshawari"]),
-        ]
 
-        def score(label: str) -> int:
-            ll = label.lower().strip()
-            if ll in {"nan", "naan"}:
-                return 120
-            for i, (_k, toks) in enumerate(prefs):
-                if any(t in ll for t in toks):
-                    return 100 - i
-            return 0
-
-        items.sort(key=lambda x: (score(x[0]), -len(x[0])), reverse=True)
-        return items
-
-    def _naan_optima_prompt(self, *, list_mode: str = "short", with_main: Optional[str] = None) -> str:
-        st = self.state
-        menu = st.menu
-        opts = self._naan_options_from_menu(menu) if menu else []
-        max_n = 2 if list_mode == "short" else 4
-
-        if not opts:
-            if st.lang != "nl":
-                return (
-                    f"Certainly. Would you like plain naan or garlic naan with your {with_main}?"
-                    if with_main
-                    else "Which naan would you like, plain or garlic?"
-                )
-            return (
-                f"Zeker. Wil je plain naan of garlic naan bij je {with_main}?"
-                if with_main
-                else "Welke naan wil je, plain of garlic?"
-            )
-
-        picked = opts[:max_n]
-        labels = [p[0] for p in picked]
-
-        if st.lang != "nl":
-            if with_main and len(labels) >= 2:
-                return f"Certainly. Would you like {labels[0]} or {labels[1]} with your {with_main}?"
-            if len(labels) >= 2:
-                return f"Would you like {labels[0]} or {labels[1]}?"
-            return f"We have {labels[0]}. Would you like that?"
-        else:
-            if with_main and len(labels) >= 2:
-                return f"Zeker. Wil je {labels[0]} of {labels[1]} bij je {with_main}?"
-            if len(labels) >= 2:
-                return f"Wil je {labels[0]} of {labels[1]}?"
-            return f"We hebben {labels[0]}. Wil je die?"
-
-    def _find_naan_item_for_variant(self, menu: MenuSnapshot, variant: str) -> Optional[str]:
-        if not menu or not variant:
-            return None
-        v = variant.lower().strip()
-        opts = self._naan_options_from_menu(menu)
-        if not opts:
-            return None
-
-        best: Optional[str] = None
-        best_score = -10
-
-        for label, iid in opts:
-            ll = label.lower().strip()
-            s = 0
-
-            if v == "plain":
-                if ll in {"nan", "naan"}:
-                    s += 50
-                if any(t in ll for t in ["plain", "regular", "normal", "gewoon", "standaard"]):
-                    s += 20
-
-            if v == "garlic" and any(t in ll for t in ["garlic", "knoflook"]):
-                s += 25
-            if v == "butter" and any(t in ll for t in ["butter", "boter"]):
-                s += 25
-            if v == "cheese" and any(t in ll for t in ["cheese", "kaas"]):
-                s += 25
-            if v == "keema" and "keema" in ll:
-                s += 25
-            if v == "peshawari" and "peshawari" in ll:
-                s += 25
-
-            if v in ll:
-                s += 8
-
-            if s > best_score:
-                best_score = s
-                best = iid
-
-        return best if best_score >= 0 else None
 
     def _parse_fulfillment(self, text: str) -> Optional[str]:
         t = norm_simple(text)
@@ -1163,7 +1004,7 @@ class SessionController:
                 adds = [] if orch_item_id else parse_add_item(st.menu, transcript, qty=effective_qty)
 
                 mentions_nan = (" naan " in (" " + norm_simple(transcript) + " ")) or detect_generic_nan_request(transcript)
-                variant = _extract_nan_variant_keyword_scoped(transcript)
+                variant = extract_naan_variant_keyword_scoped(transcript)
                 has_variant = bool(variant)
 
                 naan_opts = self._naan_options_from_menu(st.menu)
@@ -1175,7 +1016,7 @@ class SessionController:
                 if mentions_nan and (not has_variant):
                     non_nan_hits: List[Tuple[str, int]] = []
                     for item_id, qty in adds:
-                        if not self._is_nan_item(st.menu, item_id):
+                        if not is_naan_item(st.menu, item_id):
                             non_nan_hits.append((item_id, qty))
 
                     for item_id, qty in non_nan_hits:
@@ -1188,19 +1029,19 @@ class SessionController:
                     st.nan_prompt_count = 0
 
                     await self.clear_thinking(ws)
-                    await self._speak(ws, self._naan_optima_prompt(list_mode="short", with_main="Butter Chicken" if "butter chicken" in norm_simple(transcript) else None))
+                    await self._speak(ws, naan_optima_prompt(st.menu, st.lang, list_mode="short", with_main=None))
                     return
 
                 if mentions_nan and has_variant:
-                    iid = self._find_naan_item_for_variant(st.menu, variant or "")
+                    iid = find_naan_item_for_variant(st.menu, variant or "")
                     if iid:
                         st.order.add(iid, max(1, int(effective_qty or 1)))
                         added_any = True
                         added_ids.append(iid)
-                        adds = [(x, q) for (x, q) in adds if x != iid and not self._is_nan_item(st.menu, x)]
+                        adds = [(x, q) for (x, q) in adds if x != iid and not is_naan_item(st.menu, x)]
 
                 for item_id, qty in adds:
-                    if mentions_nan and has_variant and self._is_nan_item(st.menu, item_id):
+                    if mentions_nan and has_variant and is_naan_item(st.menu, item_id):
                         continue
                     st.order.add(item_id, qty)
                     added_any = True
