@@ -821,12 +821,25 @@ class SessionController:
                 st.pending_name = False
                 st.pending_fulfillment = False
 
-            elif is_ordering_intent and (st.pending_fulfillment or st.pending_name):
+            elif is_ordering_intent and st.pending_fulfillment:
                 logger.info(
-                    "[v0.7.7] Global Guard: ordering intent seen during slot-fill; ROUTE TO ORDERING (pending_name=%s pending_fulfillment=%s)",
+                    "[v0.7.7] Global Guard: ordering intent seen during fulfillment slot-fill; RE-ASK FULFILLMENT (pending_name=%s pending_fulfillment=%s)",
                     st.pending_name,
                     st.pending_fulfillment,
                 )
+                # pending_fulfillment is a HARD gate: do not process ordering until resolved
+                await self.clear_thinking(ws)
+                await self._speak(ws, self._say_pickup_or_delivery())
+                return
+
+            elif is_ordering_intent and st.pending_name:
+                logger.info(
+                    "[v0.7.7] Global Guard: ordering intent seen during name slot-fill; ROUTE TO ORDERING (pending_name=%s pending_fulfillment=%s)",
+                    st.pending_name,
+                    st.pending_fulfillment,
+                )
+                # Do NOT clear pending_fulfillment/pending_name here.
+
                 # IMPORTANT:
                 # Do NOT clear pending_fulfillment/pending_name here.
                 # Do NOT return; ordering logic below should handle this transcript.
