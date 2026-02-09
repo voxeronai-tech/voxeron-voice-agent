@@ -55,6 +55,7 @@ _PROTEIN_MARKERS = {
     "lamb": ("lamb", "lam", "lams"),
     "chicken": ("chicken", "kip"),
     "vegetarian": ("vegetarian", "vegetarisch", "vega", "veg", "paneer"),
+    "biryani": ("biryani",),
 }
 
 
