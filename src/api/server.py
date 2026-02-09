@@ -450,6 +450,12 @@ async def _handle_ws(ws: WebSocket) -> None:
     # Extra patience if the buffered utter is "short" (likely stutter / incomplete thought)
     PAUSE_MERGE_SEC_FRAGMENT = settings.PAUSE_MERGE_SEC_FRAGMENT
     FRAGMENT_MAX_BYTES = settings.FRAGMENT_MAX_BYTES # ~0.5s at 16kHz * 16-bit mono (adjust if your PCM differs)
+    logger.info(
+        "[seg_cfg] PAUSE_MERGE_SEC=%.2f PAUSE_MERGE_SEC_FRAGMENT=%.2f FRAGMENT_MAX_BYTES=%d",
+        PAUSE_MERGE_SEC,
+        PAUSE_MERGE_SEC_FRAGMENT,
+        FRAGMENT_MAX_BYTES,
+    )
 
     # Server-side barge-in on audio energy (in case client doesn't send "barge_in")
     # tune, start ~350-600 depending on mic/noise
