@@ -94,31 +94,51 @@ def _dedup_keep_order(xs: Iterable[str], *, limit: int) -> List[str]:
 # -----------------------------------------------------------------------------
 def extract_naan_variant_keyword_scoped(text: str) -> Optional[str]:
     """
-    Extract a generic variant keyword (garlic/plain/cheese/etc.) from free text.
-    Tenant-agnostic and menu-agnostic: this only detects the variant intent.
+    Extract a generic naan variant keyword (garlic/cheese/butter/keema/peshawari/plain),
+    but ONLY when it appears in a tight window around a naan token.
+    This prevents false positives like: "butter chicken ... and three naan" -> butter.
     """
     t = norm_simple(text)
     if not t:
         return None
 
-    # Highest-signal variants first
-    if ("garlic" in t) or ("knoflook" in t):
-        return "garlic"
-    if ("cheese" in t) or ("kaas" in t):
-        return "cheese"
-    if ("butter" in t) or ("boter" in t):
-        return "butter"
-    if ("keema" in t) or ("kheema" in t):
-        return "keema"
-    if "peshawari" in t:
-        return "peshawari"
+    toks = [x for x in t.split() if x]
+    if not toks:
+        return None
 
-    # Default/plain signals (keep broad)
-    if any(x in t for x in ("plain", "regular", "normal", "gewoon", "normaal", "standaard")):
-        return "plain"
+    naan_toks = {"naan", "nan"}
+
+    # Variants (highest-signal first)
+    variant_map = [
+        ("garlic", {"garlic", "knoflook"}),
+        ("cheese", {"cheese", "kaas"}),
+        ("butter", {"butter", "boter"}),
+        ("keema", {"keema", "kheema"}),
+        ("peshawari", {"peshawari"}),
+        ("plain", {"plain", "regular", "normal", "gewoon", "normaal", "standaard"}),
+    ]
+
+    naan_positions = [i for i, tok in enumerate(toks) if tok in naan_toks]
+    if not naan_positions:
+        return None
+
+    # Tight context window around naan to avoid "butter chicken ... naan" bleed.
+    WIN_BEFORE = 2
+    WIN_AFTER = 2
+
+    for ni in naan_positions:
+        lo = max(0, ni - WIN_BEFORE)
+        hi = min(len(toks), ni + WIN_AFTER + 1)
+        window = toks[lo:hi]
+
+        for variant, vset in variant_map:
+            if any(w in vset for w in window):
+                # "plain" isn't an explicit variant in most flows; treat as None.
+                if variant == "plain":
+                    return None
+                return variant
 
     return None
-
 
 
 def list_items_for_protein(
