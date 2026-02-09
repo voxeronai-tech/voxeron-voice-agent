@@ -927,8 +927,14 @@ class SessionController:
             # 5) Slot handling (Intent-aware, non-greedy)
             # ==========================================================
             # Fulfillment slot (intent-aware, non-greedy)
-            if st.pending_fulfillment and not (is_ordering_intent or looks_like_order_payload):
-
+            # Guard: if user continues ordering while we are waiting for pickup/delivery,
+            # do NOT route into ordering (naan prompts, etc.). Re-ask fulfillment and return.
+            if st.pending_fulfillment and (is_ordering_intent or looks_like_order_payload):
+                logger.info("[guard] ordering payload during pending_fulfillment -> re-ask fulfillment")
+                await self.clear_thinking(ws)
+                await self._speak(ws, self._say_pickup_or_delivery())
+                return
+            if st.pending_fulfillment:
                 if self._is_obvious_out_of_scope(transcript):
                     await self.clear_thinking(ws)
                     await self._speak(ws, "I can help with the order — is this for pickup or delivery?")
@@ -976,6 +982,24 @@ class SessionController:
 
                 if self._is_refusal_like(transcript):
                     await self._speak(ws, "No problem. What name should I put the order under?")
+                    return
+                
+                # Guard: user answered fulfillment or continued ordering while we asked for name.
+                mode = self._parse_fulfillment(transcript)
+                if mode in ("pickup", "delivery"):
+                    await self._speak(ws, "Thanks — what name should I put the order under?")
+                    return
+
+                tnorm_name = " " + norm_simple(transcript) + " "
+                if any(
+                    x in tnorm_name
+                    for x in (
+                        " one ", " two ", " three ", " four ", " five ", " six ", " seven ", " eight ", " nine ", " ten ",
+                        " 1 ", " 2 ", " 3 ", " 4 ", " 5 ", " 6 ", " 7 ", " 8 ", " 9 ",
+                        " een ", " twee ", " drie ", " vier ", " vijf ", " zes ", " zeven ", " acht ", " negen ", " tien ",
+                    )
+                ):
+                    await self._speak(ws, "Got it — what name should I put the order under?")
                     return
 
                 if not self._looks_like_name_answer(transcript):
