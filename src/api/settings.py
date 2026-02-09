@@ -77,7 +77,7 @@ VAD_DEBUG = _get_bool("VAD_DEBUG", "0")
 # Utterance merge / interruption control (server policy)
 # --------------------------------------------------
 #PAUSE_MERGE_SEC = _get_float("PAUSE_MERGE_SEC", "2.8")
-PAUSE_MERGE_SEC = _get_float("PAUSE_MERGE_SEC", "2.8")
+PAUSE_MERGE_SEC = _get_float("PAUSE_MERGE_SEC", "4.5")
 #PAUSE_MERGE_SEC_FRAGMENT = _get_float("PAUSE_MERGE_SEC_FRAGMENT", "3.2")
 PAUSE_MERGE_SEC_FRAGMENT = _get_float("PAUSE_MERGE_SEC_FRAGMENT", "6.0")
 FRAGMENT_MAX_BYTES = _get_int("FRAGMENT_MAX_BYTES", "16000")
