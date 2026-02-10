@@ -11,14 +11,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import WebSocket
 
-from .intent import (
-    detect_language_intent,
-    norm_simple,
-    detect_generic_nan_request,
-    detect_explicit_remove_intent,
-)
+from .intent import detect_language_intent, norm_simple
+
 from .menu_store import MenuSnapshot, MenuStore
-from .menu_knowledge import extract_naan_variant_keyword_scoped, is_naan_item, naan_optima_prompt, find_naan_item_for_variant
 from .tenant_manager import TenantManager, TenantConfig
 from .policy import (
     SessionPolicyState,
@@ -26,6 +21,8 @@ from .policy import (
 )
 from .services.openai_client import OpenAIClient
 from .telemetry.emitter import TelemetryEmitter, TelemetryContext
+from .engine.router import DomainRouter
+from .engine.types import PlanAction
 
 # Orchestrator is optional; never crash if it is unavailable.
 try:
@@ -162,6 +159,7 @@ class SessionState:
     lang_candidate: Optional[str] = None
     lang_candidate_count: int = 0
 
+    dispatcher_greeted: bool = False
 
 QTY_MAP_NL = {"een": 1, "één": 1, "1": 1, "twee": 2, "2": 2, "drie": 3, "3": 3, "vier": 4, "4": 4}
 QTY_MAP_EN = {"one": 1, "1": 1, "two": 2, "2": 2, "three": 3, "3": 3, "four": 4, "4": 4}
@@ -325,6 +323,7 @@ class SessionController:
         self.send_thinking = send_thinking
         self.clear_thinking = clear_thinking
         self.tts_end = tts_end
+        self.domain_router = DomainRouter()
 
     # -------------------------
     # UX strings
@@ -410,13 +409,6 @@ class SessionController:
             return False
         return len(t_raw.split()) <= 3
 
-    # -------------------------
-    # Menu helpers
-    # -------------------------
-
-
-
-
     def _parse_fulfillment(self, text: str) -> Optional[str]:
         t = norm_simple(text)
         if any(x in t for x in ["pickup", "pick up", "takeaway", "collection", "for pickup", "afhalen", "ophalen", "meenemen", "to go", "togo"]):
@@ -424,34 +416,7 @@ class SessionController:
         if any(x in t for x in ["delivery", "deliver", "for delivery", "bezorgen", "bezorging"]):
             return "delivery"
         return None
-
-    def _is_dispatcher(self) -> bool:
-        if self.state.phase == "dispatcher":
-            return True
-        cfg = self.state.tenant_cfg
-        if cfg and getattr(cfg, "domain_type", None) == "dispatcher":
-            return True
-        if self.state.tenant_ref == "voxeron_main":
-            return True
-        return False
-
-    def _dispatcher_route(self, text: str) -> Optional[str]:
-        t = norm_simple(text)
-        turkish = ["tesisat", "tesisatçı", "tamir", "sızınt", "boru", "su bas", "gaz kok"]
-        plumber_nl = ["loodgieter", "lekkage", "spoed", "water", "leiding", "verstopping", "afvoer"]
-        plumber_en = ["plumber", "leak", "burst", "pipe", "flood", "repair", "emergency"]
-        food_nl = ["eten", "bestellen", "indiaas", "restaurant", "afhalen", "bezorgen"]
-        food_en = ["food", "hungry", "order", "restaurant", "indian"]
-
-        if any(k in t for k in turkish):
-            return "abt"
-        if any(k in t for k in plumber_nl) or any(k in t for k in plumber_en):
-            return "abt"
-        if any(k in t for k in food_nl) or any(k in t for k in food_en):
-            return "taj_mahal"
-        return None
-
-
+    
     def _taj_overlay_alias_map(self, menu: MenuSnapshot) -> Dict[str, str]:
         """
         Map TAJ_EXTRA_ALIASES (display-name style) to actual item_ids where possible.
@@ -568,7 +533,24 @@ class SessionController:
                 return (iid, new_qty)
 
         return None
-
+    
+    def _apply_cart_ops(self, st: "SessionState", ops: list[dict]) -> bool:
+        changed = False
+        for op in ops or []:
+            kind = (op.get("op") or "").strip().lower()
+            if kind == "add":
+                item_id = op.get("item_id")
+                qty = int(op.get("qty", 1) or 1)
+                if item_id:
+                    st.order.add(item_id, max(1, qty))
+                    changed = True
+            elif kind == "set_qty":
+                item_id = op.get("item_id")
+                qty = int(op.get("qty", 1) or 1)
+                if item_id:
+                    st.order.set_qty(item_id, qty)
+                    changed = True
+        return changed
 
     async def _load_tenant_context(self, tenant_ref: str) -> None:
         st = self.state
@@ -603,6 +585,14 @@ class SessionController:
             st.stt_lang_hint = None
             st.lang_candidate = None
             st.lang_candidate_count = 0
+
+    async def _hotswap_tenant(self, ws: WebSocket, target: str) -> None:
+            """
+            Switch tenant/domain mid-session.
+            No greeting, no speech. Engines decide what to say next.
+            """
+            await self._load_tenant_context(target)
+            self.state.phase = "chat"
 
     async def _speak(self, ws: WebSocket, text: str) -> None:
         await self.send_agent_text(ws, text)
@@ -854,51 +844,6 @@ class SessionController:
                 if st.tenant_ref == "taj_mahal" and st.lang == "nl":
                     st.stt_lang_hint = "nl"
 
-            allow_auto = not (st.tenant_ref == "taj_mahal" and st.lang != "nl")
-            _ = detect_language_intent(
-                transcript,
-                phase=st.phase,
-                current_lang=st.lang,
-                allow_auto_detect=allow_auto,
-            )
-
-            # ==========================================================
-            # 3) Dispatcher routing
-            # ==========================================================
-            if self._is_dispatcher():
-                target = self._dispatcher_route(transcript)
-                if not target:
-                    await self.clear_thinking(ws)
-                    await self._speak(ws, "Hi, this is Voxeron. Which service do you need?")
-                    return
-
-                await self.clear_thinking(ws)
-                if target == "taj_mahal":
-                    await self._speak(ws, "Okay — connecting you now." if st.lang != "nl" else "Prima — ik verbind u nu door.")
-                    logger.info("[hot_swap] from=%s to=%s", st.tenant_ref, target)
-                    await self._load_tenant_context(target)
-                    st.phase = "chat"
-                    taj_greet = (
-                        "Hi! Welcome to Taj Mahal Bussum. You can start ordering now. If you want Dutch, say 'Nederlands'."
-                        if st.lang != "nl"
-                        else "Welkom bij Taj Mahal Bussum. Je kunt nu bestellen."
-                    )
-                    await self._speak(ws, taj_greet)
-                    return
-
-                if target == "abt":
-                    await self._speak(ws, "Okay — connecting you now." if st.lang != "nl" else "Prima — ik verbind u nu door.")
-                    logger.info("[hot_swap] from=%s to=%s", st.tenant_ref, target)
-                    await self._load_tenant_context(target)
-                    st.phase = "chat"
-                    await self._speak(ws, "Alphabouwtechniek. Wat is er aan de hand?")
-                    return
-                
-                logger.info(
-                    "[proc_utt] transcript_len=%s text=%r",
-                    len(transcript or ""),
-                    (transcript or "")[:80],
-                )
             # ==========================================================
             # 4) Deterministic prompt-dump filter
             # ==========================================================
@@ -1012,18 +957,55 @@ class SessionController:
                 msg = f"Thank you, {st.customer_name}. {self._say_anything_else()}" if st.lang != "nl" else f"Dank je, {st.customer_name}. {self._say_anything_else()}"
                 await self._speak(ws, msg)
                 return
+ 
+            # ==========================================================
+            # 5.5) Domain engine hook (must run BEFORE ordering logic)
+            # ==========================================================
+            plan = self.domain_router.plan(st, transcript)
+
+            # apply pending gate updates (menu-blind)
+            if plan.pending_choice is not None:
+                st.pending_choice = plan.pending_choice
+                st.pending_qty = max(1, int(plan.pending_qty or 1))
+
+            # resolved choice clears the gate (menu-blind)
+            if plan.resolved_choice is not None:
+                st.pending_choice = None
+                st.pending_qty = max(1, int(plan.resolved_choice.qty or 1))
+
+            # apply generic cart ops if any
+            applied_ops = False
+            if plan.cart_ops:
+                applied_ops = self._apply_cart_ops(st, plan.cart_ops)
+
+            # hot swap target tenant if requested
+            if plan.hotswap_tenant_ref:
+                target = plan.hotswap_tenant_ref
+                logger.info("[hot_swap] from=%s to=%s", st.tenant_ref, target)
+                await self._hotswap_tenant(ws, target)
+                return
+
+            # engine wants us to speak now
+            if plan.action in (PlanAction.REPLY, PlanAction.CLARIFY):
+                await self.clear_thinking(ws)
+                if plan.reply:
+                    await self._speak(ws, plan.reply)
+                return
+
+            engine_added_any = bool(applied_ops)
 
             # ==========================================================
-            # 6) Ordering logic (Deterministic add + naan scoping)
+            # 6) Ordering logic (Deterministic add)  ✅ menu-blind here
             # ==========================================================
             add_qty = (_extract_qty_first(transcript, "en") or _extract_qty_first(transcript, "nl") or 1)
             effective_qty = add_qty
 
             cart_before = st.order.summary(st.menu) if st.menu else ""
-            added_any = False
+            added_any = bool(engine_added_any)
             added_ids: List[str] = []
 
             if st.menu:
+                # Temporary deterministic alias overlay for Taj (still menu-blind: just alias → display-name match)
                 if st.tenant_ref == "taj_mahal":
                     tok = norm_simple(transcript).strip()
                     if tok in TAJ_EXTRA_ALIASES and TAJ_EXTRA_ALIASES[tok] != "__GLOBAL_ORDER__":
@@ -1040,45 +1022,7 @@ class SessionController:
                 orch_item_id = self._maybe_orchestrator_match_item(st.menu, transcript, int(effective_qty or 1))
                 adds = [] if orch_item_id else parse_add_item(st.menu, transcript, qty=effective_qty)
 
-                mentions_nan = (" naan " in (" " + norm_simple(transcript) + " ")) or detect_generic_nan_request(transcript)
-                variant = extract_naan_variant_keyword_scoped(transcript)
-                has_variant = bool(variant)
-
-                logger.info(
-                    "naan_check mentions_nan=%s has_variant=%s variant=%s",
-                    mentions_nan, has_variant, variant,
-                )
-
-                if mentions_nan and (not has_variant):
-                    non_nan_hits: List[Tuple[str, int]] = []
-                    for item_id, qty in adds:
-                        if not is_naan_item(st.menu, item_id):
-                            non_nan_hits.append((item_id, qty))
-
-                    for item_id, qty in non_nan_hits:
-                        st.order.add(item_id, qty)
-                        added_any = True
-                        added_ids.append(item_id)
-
-                    st.pending_choice = "nan_variant"
-                    st.pending_qty = max(1, int(effective_qty or 1))
-                    st.nan_prompt_count = 0
-
-                    await self.clear_thinking(ws)
-                    await self._speak(ws, naan_optima_prompt(st.menu, st.lang, list_mode="short", with_main=None))
-                    return
-
-                if mentions_nan and has_variant:
-                    iid = find_naan_item_for_variant(st.menu, variant or "")
-                    if iid:
-                        st.order.add(iid, max(1, int(effective_qty or 1)))
-                        added_any = True
-                        added_ids.append(iid)
-                        adds = [(x, q) for (x, q) in adds if x != iid and not is_naan_item(st.menu, x)]
-
                 for item_id, qty in adds:
-                    if mentions_nan and has_variant and is_naan_item(st.menu, item_id):
-                        continue
                     st.order.add(item_id, qty)
                     added_any = True
                     added_ids.append(item_id)
@@ -1094,7 +1038,12 @@ class SessionController:
 
                 if st.fulfillment_mode == "pickup" and not st.customer_name:
                     st.pending_name = True
-                    await self._speak(ws, "Great. What name should I put the order under?" if st.lang != "nl" else "Prima. Op welke naam mag ik de bestelling zetten?")
+                    await self._speak(
+                        ws,
+                        "Great. What name should I put the order under?"
+                        if st.lang != "nl"
+                        else "Prima. Op welke naam mag ik de bestelling zetten?",
+                    )
                     return
 
                 await self._speak(ws, self._say_anything_else())

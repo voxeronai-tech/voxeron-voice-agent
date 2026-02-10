@@ -240,6 +240,7 @@ async def tenant_config(tenant: str = "default") -> JSONResponse:
     greet = _tenant_greeting_from_rules(tmp_state)
     if not greet and tenant_ref == "taj_mahal":
         greet = greeting_text_taj(tmp_state.lang)
+
     if not greet:
         greet = (
             "Hi, this is Voxeron. Which service do you need?"
@@ -257,7 +258,6 @@ async def tenant_config(tenant: str = "default") -> JSONResponse:
             "greeting": greet,
         }
     )
-
 
 async def heartbeat_loop(ws: WebSocket, controller: SessionController) -> None:
     """
@@ -414,20 +414,13 @@ async def _handle_ws(ws: WebSocket) -> None:
     except Exception:
         state.heartbeat_task = None
 
-    greet = _tenant_greeting_from_rules(state)
-    if not greet and state.tenant_ref == "taj_mahal":
-        greet = greeting_text_taj(state.lang)
-    if not greet:
-        greet = "Hi, this is Voxeron. Which service do you need?"
-
+    # server does NOT speak; it only sets initial phase
     if is_dispatcher:
         state.phase = "dispatcher"
-
-    await send_agent_text(ws, greet)
-    await controller.stream_tts_mp3(ws, greet)
-
-    state.last_agent_speech_end_ts = time.time()
-    state.last_activity_ts = state.last_agent_speech_end_ts
+    else:
+        # keep whatever your non-dispatcher default is
+        # e.g. "chat" or "language_select"
+        state.phase = getattr(state, "phase", "chat")
 
     vad = VAD(
         frame_ms=settings.AUDIO_FRAME_MS,
