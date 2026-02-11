@@ -11,7 +11,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import WebSocket
 
-from .intent import detect_language_intent, norm_simple
+from .intent import (
+    detect_language_intent,
+    detect_explicit_remove_intent,
+    norm_simple,
+)
 
 from .menu_store import MenuSnapshot, MenuStore
 from .tenant_manager import TenantManager, TenantConfig
@@ -22,7 +26,7 @@ from .policy import (
 from .services.openai_client import OpenAIClient
 from .telemetry.emitter import TelemetryEmitter, TelemetryContext
 from .engine.router import DomainRouter
-from .engine.types import PlanAction
+from .engine.types import PlanAction, ResponsePlan
 
 # Orchestrator is optional; never crash if it is unavailable.
 try:
@@ -534,19 +538,23 @@ class SessionController:
 
         return None
     
-    def _apply_cart_ops(self, st: "SessionState", ops: list[dict]) -> bool:
+    def _apply_cart_ops(self, st: "SessionState", ops) -> bool:
         changed = False
         for op in ops or []:
-            kind = (op.get("op") or "").strip().lower()
-            if kind == "add":
+            if hasattr(op, "op") and hasattr(op, "item_id"):
+                kind = (op.op or "").strip().lower()
+                item_id = op.item_id
+                qty = int(getattr(op, "qty", 1) or 1)
+            else:
+                kind = (op.get("op") or "").strip().lower()
                 item_id = op.get("item_id")
                 qty = int(op.get("qty", 1) or 1)
+
+            if kind == "add":
                 if item_id:
                     st.order.add(item_id, max(1, qty))
                     changed = True
             elif kind == "set_qty":
-                item_id = op.get("item_id")
-                qty = int(op.get("qty", 1) or 1)
                 if item_id:
                     st.order.set_qty(item_id, qty)
                     changed = True
@@ -593,6 +601,7 @@ class SessionController:
             """
             await self._load_tenant_context(target)
             self.state.phase = "chat"
+            setattr(self.state, "restaurant_greeted", False)
 
     async def _speak(self, ws: WebSocket, text: str) -> None:
         await self.send_agent_text(ws, text)
@@ -632,6 +641,52 @@ class SessionController:
         try:
             await st.tts_task
         except asyncio.CancelledError:
+            return
+
+    async def on_connect(self, ws: WebSocket) -> None:
+        """
+        Connect-tick: allow engines to emit a first prompt (e.g. dispatcher greeting)
+        without requiring user audio / STT. Server stays string-free.
+        """
+        st = self.state
+
+        plan = self.domain_router.plan(st, "")
+
+        # apply pending gate updates (menu-blind)
+        if plan.pending_choice is not None:
+            st.pending_choice = plan.pending_choice
+            st.pending_qty = max(1, int(plan.pending_qty or 1))
+
+        # resolved choice clears the gate (menu-blind)
+        if plan.resolved_choice is not None:
+            st.pending_choice = None
+            st.pending_qty = max(1, int(plan.resolved_choice.qty or 1))
+
+        # apply generic cart ops if any
+        if plan.cart_ops:
+            self._apply_cart_ops(st, plan.cart_ops)
+
+        # hot swap target tenant if requested
+        if plan.hotswap_tenant_ref:
+            await self.clear_thinking(ws)
+
+            # speak connect message (engine-owned)
+            if plan.reply:
+                await self._speak(ws, plan.reply)
+
+            target = plan.hotswap_tenant_ref
+            logger.info("[hot_swap] from=%s to=%s", st.tenant_ref, target)
+            await self._hotswap_tenant(ws, target)
+
+            # greet the new tenant/domain (engine-owned)
+            await self.on_connect(ws)
+            return
+        
+        # speak greeting / question
+        if plan.action in (PlanAction.REPLY, PlanAction.CLARIFY):
+            await self.clear_thinking(ws)
+            if plan.reply:
+                await self._speak(ws, plan.reply)
             return
 
     async def process_utterance(self, ws: WebSocket, pcm: bytes) -> None:
@@ -962,6 +1017,9 @@ class SessionController:
             # 5.5) Domain engine hook (must run BEFORE ordering logic)
             # ==========================================================
             plan = self.domain_router.plan(st, transcript)
+            if plan is None:
+                logger.error("CRITICAL: domain_router.plan returned None (phase=%s)", getattr(st, "phase", ""))
+                plan = ResponsePlan(action=PlanAction.NOOP, reply="", lang=getattr(st, "lang", "en") or "en")
 
             # apply pending gate updates (menu-blind)
             if plan.pending_choice is not None:
@@ -980,9 +1038,18 @@ class SessionController:
 
             # hot swap target tenant if requested
             if plan.hotswap_tenant_ref:
+                await self.clear_thinking(ws)
+
+                # speak connect message (engine-owned)
+                if plan.reply:
+                    await self._speak(ws, plan.reply)
+
                 target = plan.hotswap_tenant_ref
                 logger.info("[hot_swap] from=%s to=%s", st.tenant_ref, target)
                 await self._hotswap_tenant(ws, target)
+
+                # greet the new tenant/domain (engine-owned)
+                await self.on_connect(ws)
                 return
 
             # engine wants us to speak now

@@ -160,11 +160,35 @@ class RestaurantEngine:
                 debug={"reason": "naan_variant_resolved", "variant": variant, "added": bool(iid)},
             )
 
-        # Not understood => let controller continue (it may ask pickup/delivery etc.)
-        return None
+        # Not understood => keep gate and let controller continue
+        return ResponsePlan(
+            action=PlanAction.NOOP,
+            reply="",
+            lang=getattr(st, "lang", "en"),
+            pending_choice="nan_variant",
+            pending_qty=max(1, int(getattr(st, "pending_qty", 1) or 1)),
+            debug={"reason": "naan_variant_not_understood"},
+        )
 
     def plan(self, state: Any, transcript: str) -> ResponsePlan:
         st = state
+
+        t_raw = (transcript or "").strip()
+        lang = getattr(st, "lang", "en") or "en"
+
+        # Connect-tick greeting (one-time) for restaurant domain
+        if not t_raw:
+            if getattr(st, "restaurant_greeted", False):
+                return ResponsePlan(action=PlanAction.NOOP, reply="", lang=lang)
+
+            setattr(st, "restaurant_greeted", True)
+
+            greet = (
+                "Hi! Welcome to Taj Mahal Bussum. You can start ordering now. If you want Dutch, say 'Nederlands'."
+                if lang != "nl"
+                else "Welkom bij Taj Mahal Bussum. Je kunt nu bestellen."
+            )
+            return ResponsePlan(action=PlanAction.REPLY, reply=greet, lang=lang)
 
         # 0) Resolve pending choice FIRST
         resolved = self._resolve_pending_nan_variant(st, transcript)
@@ -177,7 +201,7 @@ class RestaurantEngine:
         if tnorm and "lamb" in tnorm and "menu" in tnorm and any(x in tnorm for x in ("dish", "dishes", "gerechten")):
             top3 = self._top3_lamb(st)
             items = ", ".join(top3)
-            if getattr(st, "lang", "en") == "nl":
+            if lang == "nl":
                 msg = f"Even kijken. We hebben bijvoorbeeld {items}. Zegt een van deze u iets?"
             else:
                 msg = (
@@ -186,6 +210,19 @@ class RestaurantEngine:
                 )
             st.last_category = "lamb"
             st.last_category_items = top3
-            return ResponsePlan(action=PlanAction.REPLY, reply=msg, lang=getattr(st, "lang", "en"), debug={"reason": "top3_lamb"})
+            return ResponsePlan(
+                action=PlanAction.REPLY,
+                reply=msg,
+                lang=lang,
+                debug={"reason": "top3_lamb"},
+            )
 
-        return ResponsePlan(action=PlanAction.NOOP, reply="", lang=getattr(st, "lang", "en"))
+        # Default: do nothing, let SessionController continue with deterministic ordering logic
+        return ResponsePlan(
+            action=PlanAction.NOOP,
+            reply="",
+            lang=lang,
+            debug={"reason": "restaurant_noop_default"},
+        )
+
+
