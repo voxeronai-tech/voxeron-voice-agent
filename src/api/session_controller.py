@@ -595,13 +595,13 @@ class SessionController:
             st.lang_candidate_count = 0
 
     async def _hotswap_tenant(self, ws: WebSocket, target: str) -> None:
-            """
-            Switch tenant/domain mid-session.
-            No greeting, no speech. Engines decide what to say next.
-            """
-            await self._load_tenant_context(target)
-            self.state.phase = "chat"
-            setattr(self.state, "restaurant_greeted", False)
+        """
+        Switch tenant/domain mid-session.
+        No greeting, no speech. Engines decide what to say next.
+        """
+        await self._load_tenant_context(target)
+        self.state.phase = "chat"
+        setattr(self.state, "restaurant_greeted", False)
 
     async def _speak(self, ws: WebSocket, text: str) -> None:
         await self.send_agent_text(ws, text)
@@ -645,49 +645,36 @@ class SessionController:
 
     async def on_connect(self, ws: WebSocket) -> None:
         """
-        Connect-tick: allow engines to emit a first prompt (e.g. dispatcher greeting)
+        Connect-tick: allow engines to emit a first prompt (greeting / clarify)
         without requiring user audio / STT. Server stays string-free.
         """
         st = self.state
 
         plan = self.domain_router.plan(st, "")
 
-        # apply pending gate updates (menu-blind)
-        if plan.pending_choice is not None:
-            st.pending_choice = plan.pending_choice
-            st.pending_qty = max(1, int(plan.pending_qty or 1))
+        # Defensive: engines must return a ResponsePlan
+        if plan is None:
+            logger.error("CRITICAL: DomainRouter.plan returned None (phase=%s)", getattr(st, "phase", ""))
+            return
 
-        # resolved choice clears the gate (menu-blind)
-        if plan.resolved_choice is not None:
-            st.pending_choice = None
-            st.pending_qty = max(1, int(plan.resolved_choice.qty or 1))
-
-        # apply generic cart ops if any
-        if plan.cart_ops:
-            self._apply_cart_ops(st, plan.cart_ops)
-
-        # hot swap target tenant if requested
+        # If engine requests a hotswap on connect, execute it (speak connect message once)
         if plan.hotswap_tenant_ref:
-            await self.clear_thinking(ws)
-
-            # speak connect message (engine-owned)
             if plan.reply:
+                await self.clear_thinking(ws)
                 await self._speak(ws, plan.reply)
 
             target = plan.hotswap_tenant_ref
             logger.info("[hot_swap] from=%s to=%s", st.tenant_ref, target)
             await self._hotswap_tenant(ws, target)
 
-            # greet the new tenant/domain (engine-owned)
+            # Now greet the new domain/tenant (engine-owned)
             await self.on_connect(ws)
             return
-        
-        # speak greeting / question
-        if plan.action in (PlanAction.REPLY, PlanAction.CLARIFY):
+
+        # Otherwise speak greeting / clarify if provided
+        if plan.action in (PlanAction.REPLY, PlanAction.CLARIFY) and plan.reply:
             await self.clear_thinking(ws)
-            if plan.reply:
-                await self._speak(ws, plan.reply)
-            return
+            await self._speak(ws, plan.reply)
 
     async def process_utterance(self, ws: WebSocket, pcm: bytes) -> None:
         st = self.state
@@ -1040,7 +1027,7 @@ class SessionController:
             if plan.hotswap_tenant_ref:
                 await self.clear_thinking(ws)
 
-                # speak connect message (engine-owned)
+                # speak connect message ONCE (engine-owned)
                 if plan.reply:
                     await self._speak(ws, plan.reply)
 

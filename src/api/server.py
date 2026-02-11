@@ -414,13 +414,13 @@ async def _handle_ws(ws: WebSocket) -> None:
     except Exception:
         state.heartbeat_task = None
 
-    # server does NOT speak; it only sets initial phase
     if is_dispatcher:
         state.phase = "dispatcher"
     else:
-        # keep whatever your non-dispatcher default is
-        # e.g. "chat" or "language_select"
         state.phase = getattr(state, "phase", "chat")
+
+    # Connect tick (server stays string-free; engines own greeting)
+    await controller.on_connect(ws)
 
     vad = VAD(
         frame_ms=settings.AUDIO_FRAME_MS,
@@ -593,11 +593,6 @@ async def _handle_ws(ws: WebSocket) -> None:
         except Exception:
             pass
         try:
-            if state.proc_task and not state.proc_task.done():
-                state.proc_task.cancel()
-        except Exception:
-            pass
-        try:
             if state.tts_task and not state.tts_task.done():
                 state.tts_task.cancel()
         except Exception:
@@ -606,7 +601,6 @@ async def _handle_ws(ws: WebSocket) -> None:
             await ws.close()
         except Exception:
             pass
-
 
 @app.websocket("/ws_pcm")
 async def ws_pcm(ws: WebSocket) -> None:
