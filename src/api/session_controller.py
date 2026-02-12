@@ -72,6 +72,11 @@ NAME_STT_PROMPT = (
     "Do NOT turn it into commands like 'ik wil bestellen', 'pickup', or 'delivery'."
 )
 
+GATE_STT_FALLBACK_PROMPT = (
+    "The user is answering a multiple-choice question. "
+    "Return only the chosen option words, no extra text."
+)
+
 # Temporary deterministic alias overlay for Taj (until Tenant Overlay / Discovery Engine lands)
 TAJ_EXTRA_ALIASES: Dict[str, str] = {
     "tikken": "Chicken Tikka",
@@ -144,7 +149,9 @@ class SessionState:
     last_agent_speech_end_ts: float = 0.0
 
     # Naan disambiguation
-    pending_choice: Optional[str] = None  # "nan_variant"
+    pending_choice: Optional[str] = None  # engine-owned opaque gate id
+    current_choice_hint: Optional[str] = None  # engine-provided STT bias for NEXT turn
+    pending_choices: list[str] = field(default_factory=list)
     pending_qty: int = 1
     nan_prompt_count: int = 0
 
@@ -199,6 +206,19 @@ def _looks_like_stt_prompt_dump(text: str) -> bool:
         return True
     return False
 
+def _pending_qty_get(st, choice: str, default: int = 1) -> int:
+    m = getattr(st, "pending_qty_by_choice", None)
+    if not isinstance(m, dict):
+        m = {}
+        setattr(st, "pending_qty_by_choice", m)
+    return max(1, int(m.get(choice, default) or default))
+
+def _pending_qty_set(st, choice: str, qty: int) -> None:
+    m = getattr(st, "pending_qty_by_choice", None)
+    if not isinstance(m, dict):
+        m = {}
+        setattr(st, "pending_qty_by_choice", m)
+    m[choice] = max(1, int(qty or 1))
 
 def parse_add_item(menu: MenuSnapshot, text: str, *, qty: int) -> List[Tuple[str, int]]:
     t = " " + norm_simple(text) + " "
@@ -690,10 +710,13 @@ class SessionController:
         try:
             await self.send_thinking(ws)
 
-             # ----------------------------------------------------------
-            # STT MODE SELECTION (critical fix)
-            # If we're slot-filling, do NOT use tenant stt_prompt_base.
-            # Use dedicated prompts to avoid "bestellen" bias.
+            # ----------------------------------------------------------
+            # STT MODE SELECTION (hardened)
+            # Rules:
+            # - If we're slot-filling (name/fulfillment), NEVER use tenant stt_prompt_base.
+            # - If a gate is pending (pending_choice), bias STT using st.current_choice_hint
+            #   and NEVER use tenant stt_prompt_base (prevents "bestellen" hallucination).
+            # - Otherwise, normal STT may use tenant stt_prompt_base.
             # ----------------------------------------------------------
             transcript = ""
 
@@ -715,6 +738,12 @@ class SessionController:
                     logger.info("STT_RESULT_SITE tag=%s len=%s text=%r", tag, len(t), t[:120])
                 except Exception:
                     pass
+
+            def _choose_stt_lang() -> Optional[str]:
+                # Taj: multilingual STT unless explicit NL selected
+                if st.tenant_ref == "taj_mahal":
+                    return "nl" if st.lang == "nl" else None
+                return st.lang if st.lang in ("en", "nl", "tr") else None
 
             pcm_bytes = len(pcm or b"")
 
@@ -791,14 +820,23 @@ class SessionController:
 
                 transcript = picked or (candidates[0][0] if candidates else "")
 
-            # 3) Normal speech: allow Taj multilingual STT; tenant prompt base allowed
+            # 3) Gate pending: bias STT using engine-provided hint; NEVER use tenant base prompt
+            elif getattr(st, "pending_choice", None):
+                stt_lang: Optional[str] = _choose_stt_lang()
+                gate_prompt: Optional[str] = getattr(st, "current_choice_hint", None) or GATE_STT_FALLBACK_PROMPT
+
+                try:
+                    _stt_call_log("gate_bias", pcm_bytes, stt_lang, gate_prompt)
+                    transcript = await self.oa.transcribe_pcm(
+                        pcm, stt_lang, prompt=gate_prompt, debug_tag="controller"
+                    )
+                    _stt_result_log("gate_bias", transcript)
+                except Exception:
+                    transcript = ""
+
+            # 4) Normal speech: tenant prompt base allowed
             else:
-                # Taj: multilingual STT unless explicit NL selected
-                stt_lang: Optional[str] = None
-                if st.tenant_ref == "taj_mahal":
-                    stt_lang = "nl" if st.lang == "nl" else None
-                else:
-                    stt_lang = st.lang if st.lang in ("en", "nl", "tr") else None
+                stt_lang: Optional[str] = _choose_stt_lang()
 
                 stt_prompt: Optional[str] = None
                 if (
@@ -1008,15 +1046,47 @@ class SessionController:
                 logger.error("CRITICAL: domain_router.plan returned None (phase=%s)", getattr(st, "phase", ""))
                 plan = ResponsePlan(action=PlanAction.NOOP, reply="", lang=getattr(st, "lang", "en") or "en")
 
-            # apply pending gate updates (menu-blind)
-            if plan.pending_choice is not None:
-                st.pending_choice = plan.pending_choice
-                st.pending_qty = max(1, int(plan.pending_qty or 1))
+            # Engine → Controller contract: persist STT bias for NEXT turn (menu-blind)
+            if getattr(plan, "stt_hint", None) is not None:
+                st.current_choice_hint = plan.stt_hint
 
-            # resolved choice clears the gate (menu-blind)
+            # ----------------------------------------------------------
+            # apply pending gate updates (menu-blind, FIFO queue + per-choice qty)
+            # ----------------------------------------------------------
+            if plan.pending_choice is not None:
+                choice = plan.pending_choice
+
+                q = getattr(st, "pending_choices", None)
+                if not isinstance(q, list):
+                    q = []
+                    setattr(st, "pending_choices", q)
+
+                if choice not in q:
+                    q.append(choice)
+
+                # keep legacy field in sync for heartbeat/logs
+                st.pending_choice = q[0] if q else choice
+
+                qty = max(1, int(plan.pending_qty or 1))
+                qty_map = getattr(st, "pending_qty_by_choice", None)
+                if not isinstance(qty_map, dict):
+                    qty_map = {}
+                    setattr(st, "pending_qty_by_choice", qty_map)
+                qty_map[choice] = qty
+
+            # ----------------------------------------------------------
+            # resolved choice clears ONLY the head gate (FIFO)
+            # ----------------------------------------------------------
             if plan.resolved_choice is not None:
-                st.pending_choice = None
-                st.pending_qty = max(1, int(plan.resolved_choice.qty or 1))
+                q = getattr(st, "pending_choices", None)
+                if isinstance(q, list) and q:
+                    head = q.pop(0)
+
+                    qty_map = getattr(st, "pending_qty_by_choice", None)
+                    if isinstance(qty_map, dict):
+                        qty_map.pop(head, None)
+
+                st.pending_choice = q[0] if isinstance(q, list) and q else None
 
             # apply generic cart ops if any
             applied_ops = False
@@ -1039,11 +1109,30 @@ class SessionController:
                 await self.on_connect(ws)
                 return
 
-            # engine wants us to speak now
+            # ----------------------------------------------------------
+            # Architectural Law 1: Transcript Consumption Circuit Breaker
+            # If the engine consumed this transcript, the turn is OVER.
+            # ----------------------------------------------------------
+            if getattr(plan, "consumed", False):
+                # Engine may optionally attach a reply. If so, speak once.
+                if getattr(plan, "reply", ""):
+                    await self.clear_thinking(ws)
+                    await self._speak(ws, plan.reply)
+                return
+
+            # engine wants us to speak now (engine-owned)
             if plan.action in (PlanAction.REPLY, PlanAction.CLARIFY):
                 await self.clear_thinking(ws)
                 if plan.reply:
                     await self._speak(ws, plan.reply)
+                return
+
+            # ----------------------------------------------------------
+            # Architectural Law 2: Gate-Lock (LLM hard-stop)
+            # If ANY gate is pending, do not continue into deterministic add or LLM.
+            # Engine owns the turn until the gate closes.
+            # ----------------------------------------------------------
+            if getattr(st, "pending_choice", None):
                 return
 
             engine_added_any = bool(applied_ops)
@@ -1059,14 +1148,16 @@ class SessionController:
             added_ids: List[str] = []
 
             if st.menu:
-                # Temporary deterministic alias overlay for Taj (still menu-blind: just alias → display-name match)
+                # Temporary deterministic alias overlay for Taj
+                # (still menu-blind: alias token → display-name match)
                 if st.tenant_ref == "taj_mahal":
                     tok = norm_simple(transcript).strip()
-                    if tok in TAJ_EXTRA_ALIASES and TAJ_EXTRA_ALIASES[tok] != "__GLOBAL_ORDER__":
-                        target_name = TAJ_EXTRA_ALIASES[tok].lower()
+                    alias = TAJ_EXTRA_ALIASES.get(tok)
+                    if alias and alias != "__GLOBAL_ORDER__":
+                        target = alias.lower()
                         for _n, iid in st.menu.name_choices:
                             dn = (st.menu.display_name(iid) or "").lower()
-                            if target_name in dn:
+                            if target in dn:
                                 st.order.add(iid, max(1, int(effective_qty or 1)))
                                 added_any = True
                                 added_ids.append(iid)
@@ -1074,22 +1165,30 @@ class SessionController:
 
                 # RC3: prevent double-add when orchestrator already matched
                 orch_item_id = self._maybe_orchestrator_match_item(st.menu, transcript, int(effective_qty or 1))
-                adds = [] if orch_item_id else parse_add_item(st.menu, transcript, qty=effective_qty)
-
-                for item_id, qty in adds:
-                    st.order.add(item_id, qty)
-                    added_any = True
-                    added_ids.append(item_id)
+                if not orch_item_id:
+                    for item_id, qty in parse_add_item(st.menu, transcript, qty=effective_qty):
+                        st.order.add(item_id, qty)
+                        added_any = True
+                        added_ids.append(item_id)
 
             cart_after = st.order.summary(st.menu) if st.menu else ""
-            if added_any and st.menu and cart_after and cart_after != (cart_before or ""):
+            cart_changed = bool(st.menu and cart_after and cart_after != (cart_before or ""))
+
+            if added_any and cart_changed:
                 await self.clear_thinking(ws)
 
+                # 0) If engine requested clarification, ask it NOW (before fulfillment/name)
+                if clarify_reply:
+                    await self._speak(ws, clarify_reply)
+                    return
+
+                # 1) Ask fulfillment mode if missing
                 if not st.fulfillment_mode:
                     st.pending_fulfillment = True
                     await self._speak(ws, self._say_pickup_or_delivery())
                     return
 
+                # 2) Ask name if pickup and name missing
                 if st.fulfillment_mode == "pickup" and not st.customer_name:
                     st.pending_name = True
                     await self._speak(
@@ -1100,44 +1199,18 @@ class SessionController:
                     )
                     return
 
+                # 3) Otherwise continue ordering
                 await self._speak(ws, self._say_anything_else())
                 return
 
-            # RC3: explicit "done/checkout" intent must bypass LLM and start fulfillment flow
-            # (Prevents LLM from inventing irrelevant steps like "spice level".)
-            if st.menu:
-                t_norm = " " + norm_simple(transcript) + " "
-                checkout_intent = any(k in t_norm for k in [
-                    " that's all ", " that is all ", " thats all ", " that's it ", " thats it ",
-                    " nothing else ", " no more ", " done ", " finish ", " finalize ",
-                    " checkout ", " check out ", " place the order ", " confirm ", " complete the order ",
-                    " dat is alles ", " dat was alles ", " niks meer ", " niets meer ", " klaar ",
-                    " afronden ", " rond af ", " afrekenen ", " bevestig ", " bestelling plaatsen ",
-                    " no that will be all ", " that will be all ", " dat will be all ",
-                ])
+            # ----------------------------------------------------------
+            # FIX 1: Engine consumed this transcript (gate resolved/cancelled)
+            # Controller must stop further processing to prevent double-add
+            # ----------------------------------------------------------
+            if getattr(plan, "consumed", False):
+                logger.info("[TURN] transcript consumed by engine plan")
+                return
 
-                cart_now = st.order.summary(st.menu) if st.menu else ""
-                if checkout_intent and cart_now:
-                    await self.clear_thinking(ws)
-
-                    if not st.fulfillment_mode:
-                        st.pending_fulfillment = True
-                        await self._speak(ws, self._say_pickup_or_delivery())
-                        return
-
-                    if st.fulfillment_mode == "pickup" and not st.customer_name:
-                        st.pending_name = True
-                        await self._speak(ws, "Great. What name should I put the order under?" if st.lang != "nl" else "Prima. Op welke naam mag ik de bestelling zetten?")
-                        return
-
-                    # If we already have fulfillment + name (or delivery), recap briefly
-                    await self._speak(
-                        ws,
-                        f"Perfect. Your order is: {cart_now}. Anything else?"
-                        if st.lang != "nl"
-                        else f"Perfect. Je bestelling is: {cart_now}. Nog iets?"
-                    )
-                    return
             # RC1-3: apply deterministic qty updates before LLM
             if st.menu:
                 applied = self._maybe_orchestrator_apply_qty_update(st.menu, transcript)
