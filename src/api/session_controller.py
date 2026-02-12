@@ -1047,8 +1047,8 @@ class SessionController:
                 plan = ResponsePlan(action=PlanAction.NOOP, reply="", lang=getattr(st, "lang", "en") or "en")
 
             # Engine → Controller contract: persist STT bias for NEXT turn (menu-blind)
-            if getattr(plan, "stt_hint", None) is not None:
-                st.current_choice_hint = plan.stt_hint
+            # IMPORTANT: allow None to CLEAR stale hints
+            st.current_choice_hint = getattr(plan, "stt_hint", None)
 
             # ----------------------------------------------------------
             # apply pending gate updates (menu-blind, FIFO queue + per-choice qty)
