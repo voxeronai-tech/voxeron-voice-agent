@@ -67,3 +67,4 @@ class ResponsePlan:
 
     # optional debug metadata
     debug: Dict[str, Any] = field(default_factory=dict)
+    consumed: bool = False
