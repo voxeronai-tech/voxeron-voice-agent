@@ -316,6 +316,49 @@ class RestaurantEngine:
             )
         )
 
+        def _match_naan_from_menu(menu_obj: Any, transcript_text: str) -> Optional[str]:
+            """
+            Menu-driven variant resolution.
+            Finds the best matching naan item_id by token overlap with display_name.
+            Domain stays in engine; controller remains blind.
+            """
+            if not menu_obj:
+                return None
+
+            tt = (norm_simple(transcript_text) or "").strip()
+            if not tt:
+                return None
+
+            # tokens that carry "variant" meaning; strip filler + the keyword itself
+            stop = {
+                "naan", "nan", "the", "a", "an", "please", "pls", "i", "want", "would", "like",
+                "do", "you", "have", "on", "menu", "which", "wat", "welke",
+            }
+            toks = [w for w in tt.split() if w and w not in stop]
+            if not toks:
+                return None
+
+            best_iid: Optional[str] = None
+            best_score = 0
+
+            for _n, iid in getattr(menu_obj, "name_choices", []) or []:
+                dn = (menu_obj.display_name(iid) or "").strip().lower()
+                if not dn:
+                    continue
+                if ("naan" not in dn) and ("nan" not in dn):
+                    continue
+
+                score = 0
+                for tok in toks:
+                    if tok in dn:
+                        score += 1
+
+                if score > best_score:
+                    best_score = score
+                    best_iid = iid
+
+            return best_iid if best_score > 0 else None
+
         # If user is asking a question, keep the clarification loop
         if self._is_spicy_query(transcript) or self._looks_like_question(transcript):
             info = (
@@ -341,8 +384,8 @@ class RestaurantEngine:
         if self._is_cancel_intent(t):
             self._clear_pending_gate(st, choice)
             return ResponsePlan(
-                action=PlanAction.UPDATE_CART,
-                reply="",
+                action=PlanAction.REPLY,
+                reply=("Okay, cancelled." if lang != "nl" else "Oké, geannuleerd."),
                 lang=lang,
                 pending_choice=None,
                 pending_qty=qty,
@@ -356,14 +399,14 @@ class RestaurantEngine:
             if not menu:
                 self._clear_pending_gate(st, choice)
                 return ResponsePlan(
-                    action=PlanAction.NOOP,
-                    reply="",
+                    action=PlanAction.CLARIFY,
+                    reply=self._ask_variant_from_menu(getattr(st, "menu", None), "naan", lang),
                     lang=lang,
-                    pending_choice=None,
+                    pending_choice=choice,
                     pending_qty=qty,
-                    stt_hint=None,
+                    stt_hint=stt_hint,
                     consumed=True,
-                    debug={"reason": "naan_variant_cleared_no_menu"},
+                    debug={"reason": "naan_variant_no_menu_reprompt"},
                 )
 
             variant = "keema" if is_keema else "plain"
@@ -373,16 +416,35 @@ class RestaurantEngine:
                 st.order.add(iid, qty)
 
             self._clear_pending_gate(st, choice)
+            said = menu.display_name(iid) if (iid and menu) else ("naan" if lang != "nl" else "naan")
             return ResponsePlan(
-                action=PlanAction.UPDATE_CART,
-                reply="",
+                action=PlanAction.REPLY,
+                reply=(f"Okay, {qty}x {said}." if lang != "nl" else f"Oké, {qty}x {said}."),
                 lang=lang,
                 pending_choice=None,
                 pending_qty=qty,
                 stt_hint=None,
                 consumed=True,
-                debug={"reason": "naan_variant_resolved", "variant": variant, "added": bool(iid), "qty": qty},
+                debug={"reason": "naan_variant_resolved_fast", "variant": variant, "added": bool(iid), "qty": qty},
             )
+
+        # Menu-driven resolution for other variants (garlic/cheese/peshawari/chili/etc.)
+        if menu:
+            iid = _match_naan_from_menu(menu, transcript)
+            if iid:
+                st.order.add(iid, qty)
+                self._clear_pending_gate(st, choice)
+                said = menu.display_name(iid) if menu else "naan"
+                return ResponsePlan(
+                    action=PlanAction.REPLY,
+                    reply=(f"Okay, {qty}x {said}." if lang != "nl" else f"Oké, {qty}x {said}."),
+                    lang=lang,
+                    pending_choice=None,
+                    pending_qty=qty,
+                    stt_hint=None,
+                    consumed=True,
+                    debug={"reason": "naan_variant_resolved_menu_match", "added": True, "qty": qty, "item_id": iid},
+                )
 
         # Not understood: MUST reprompt (otherwise Gate-Lock creates silence)
         return ResponsePlan(
@@ -450,56 +512,93 @@ class RestaurantEngine:
             return ResponsePlan(action=PlanAction.REPLY, reply=msg, lang=lang, debug={"reason": "top3_lamb"})
 
         # ----------------------------------------------------------
-        # 2) Gate creation: biryani disambiguation
-        # If user mentions biryani without a specific variant, ask.
+        # 2) Gate creation: VARIANT BUNDLE (Optima-style, max 2 asks)
+        # If multiple items require a variant selection, ask up to 2 questions in one prompt.
+        # One gate must be able to resolve multiple answers from a single user utterance.
         # ----------------------------------------------------------
+        needs_biryani_variant = False
+        biryani_qty = 1
         if " biryani " in t:
-            has_variant = any(x in t for x in (
-                " chicken ", " lamb ", " vegetarian ", " veg ", " vegetarisch ",
-                " mix ", " mushroom ", " prawn ", " king prawn ", " garnaal ",
-                " tikka ",
-            ))
-            if not has_variant:
-                qty = self._qty_near_keyword(transcript, "biryani")
-                ask = (
-                    "Which biryani would you like, chicken, lamb, or vegetarian?"
-                    if lang != "nl"
-                    else "Welke biryani wilt u, kip, lam, of vegetarisch?"
+            has_biryani_variant = any(
+                x in t
+                for x in (
+                    " chicken ", " lamb ", " vegetarian ", " veg ", " vegetarisch ",
+                    " mix ", " mushroom ", " prawn ", " king prawn ", " garnaal ",
+                    " tikka ",
                 )
-                return ResponsePlan(
-                    action=PlanAction.CLARIFY,
-                    reply=ask,
-                    lang=lang,
-                    pending_choice="biryani_variant",
-                    pending_qty=qty,
-                    consumed=True,
-                    debug={"reason": "biryani_variant_gate_set", "qty": qty},
+            )
+            if not has_biryani_variant:
+                needs_biryani_variant = True
+                biryani_qty = self._qty_near_keyword(transcript, "biryani")
+
+        needs_naan_variant = False
+        naan_qty = 1
+        if (" naan " in t) or (" nan " in t):
+            has_naan_variant = any(
+                x in t
+                for x in (
+                    " garlic ", " knoflook ",
+                    " cheese ", " kaas ",
+                    " keema ", " kheema ",
+                    " peshawari ",
+                    " plain ", " regular ", " normal ",
+                    " gewoon ", " normaal ", " standaard ",
+                )
+            )
+            if not has_naan_variant:
+                needs_naan_variant = True
+                naan_qty = max(self._qty_near_keyword(transcript, "naan"), self._qty_near_keyword(transcript, "nan"))
+
+        if needs_biryani_variant or needs_naan_variant:
+            # Build up to TWO questions per prompt
+            questions: list[str] = []
+
+            if needs_biryani_variant:
+                questions.append(
+                    "Could you please tell me which type of biryani you would like? We have Chicken, Lamb, and Vegetable Biryani."
+                    if lang != "nl"
+                    else "Welke biryani wilt u? We hebben kip, lam, en vegetarisch."
                 )
 
-        # ----------------------------------------------------------
-        # 3) Gate creation: naan disambiguation
-        # If user mentions naan/nan without specifying variant, ask.
-        # ----------------------------------------------------------
-        if (" naan " in t) or (" nan " in t):
-            has_variant = any(x in t for x in (
-                " garlic ", " knoflook ",
-                " cheese ", " kaas ",
-                " keema ", " kheema ",
-                " peshawari ",
-                " plain ", " regular ", " normal ", " gewoon ", " normaal ", " standaard ",
-            ))
-            if not has_variant:
-                qty = self._qty_near_keyword(transcript, "naan")
-                qty = max(qty, self._qty_near_keyword(transcript, "nan"))
-                return ResponsePlan(
-                    action=PlanAction.CLARIFY,
-                    reply=self._ask_variant_from_menu(getattr(st, "menu", None), "naan", lang),
-                    lang=lang,
-                    pending_choice="nan_variant",
-                    pending_qty=qty,
-                    consumed=True,
-                    debug={"reason": "naan_variant_gate_set", "qty": qty},
+            if needs_naan_variant:
+                naan_q = self._ask_variant_from_menu(getattr(st, "menu", None), "naan", lang)
+                # Keep Optima pacing: second question prefixed with "Also,"
+                questions.append(
+                    ("Also, " + naan_q) if lang != "nl" else ("En, " + naan_q)
                 )
+
+            questions = questions[:2]
+            reply = " ".join([q.strip() for q in questions if q.strip()])
+
+            # Store bundle requirements on state (engine-owned)
+            bundle: dict[str, int] = {}
+            if needs_biryani_variant:
+                bundle["biryani_variant"] = max(1, int(biryani_qty or 1))
+            if needs_naan_variant:
+                bundle["nan_variant"] = max(1, int(naan_qty or 1))
+            setattr(st, "pending_variant_bundle", bundle)
+
+            stt_hint = (
+                "User is selecting missing variants. Return only the chosen option words.\n"
+                "Biryani: chicken, lamb, vegetable.\n"
+                "Naan: plain, garlic, keema, cheese, peshawari (or any naan option said)."
+                if lang != "nl"
+                else
+                "Gebruiker kiest ontbrekende varianten. Geef alleen de gekozen optie-woorden.\n"
+                "Biryani: kip, lam, vegetarisch.\n"
+                "Naan: plain, garlic, keema, cheese, peshawari (of een genoemde naan-optie)."
+            )
+
+            return ResponsePlan(
+                action=PlanAction.CLARIFY,
+                reply=("Certainly. " + reply) if lang != "nl" else ("Zeker. " + reply),
+                lang=lang,
+                pending_choice="variant_bundle",
+                pending_qty=1,
+                stt_hint=stt_hint,
+                consumed=True,
+                debug={"reason": "variant_bundle_gate_set", "bundle": bundle},
+            )
 
         # ----------------------------------------------------------
         # Default: NOOP, let SessionController do deterministic ordering
