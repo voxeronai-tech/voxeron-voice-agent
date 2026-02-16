@@ -142,7 +142,6 @@ class SessionState:
     last_agent_speech_end_ts: float = 0.0
 
     # Naan disambiguation
-    pending_choice: Optional[str] = None  # "nan_variant"
     pending_qty: int = 1
     nan_prompt_count: int = 0
 
