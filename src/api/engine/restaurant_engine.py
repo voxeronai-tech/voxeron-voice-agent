@@ -595,10 +595,6 @@ class RestaurantEngine:
         resolved = self._resolve_pending_variant_bundle(st, transcript)
         if resolved is not None:
             return resolved
-        
-        resolved = self._resolve_pending_biryani_variant(st, transcript)
-        if resolved is not None:
-            return resolved
 
         tnorm = norm_simple(transcript) or ""
         t = f" {tnorm} "
