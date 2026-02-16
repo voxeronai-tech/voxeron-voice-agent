@@ -694,7 +694,7 @@ class RestaurantEngine:
                 pending_choice="variant_bundle",
                 pending_qty=1,
                 stt_hint=stt_hint,
-                consumed=False,
+                consumed=True,
                 debug={"reason": "variant_bundle_gate_set", "bundle": bundle},
             )
 
