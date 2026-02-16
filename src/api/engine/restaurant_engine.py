@@ -545,14 +545,24 @@ class RestaurantEngine:
 
         # Apply resolved items to order deterministically
         order = getattr(st, "order", None)
-        if not isinstance(order, dict):
-            order = {}
-            setattr(st, "order", order)
+        if not order or not hasattr(order, "add"):
+            # If order is missing/unexpected, clear gate safely
+            setattr(st, "pending_variant_bundle", None)
+            self._clear_pending_gate(st, choice)
+            return ResponsePlan(
+                action=PlanAction.UPDATE_CART,
+                reply="",
+                lang=lang,
+                pending_choice=None,
+                pending_qty=1,
+                consumed=True,
+                debug={"reason": "variant_bundle_cleared_no_order", "added": resolved},
+            )
 
         for _k, info in resolved.items():
             iid = info["item_id"]
             q = int(info["qty"])
-            order[iid] = int(order.get(iid, 0) or 0) + q
+            order.add(iid, q)
 
         # Clear bundle + gate
         setattr(st, "pending_variant_bundle", None)
