@@ -28,7 +28,7 @@ class RestaurantEngine:
         """
         Minimal local qty extraction to support disambiguation gates.
         Handles patterns like:
-          "two biryani", "3 naan", "three naan", "2x biryani"
+          "two items", "3 sides", "three extras", "2x special"
         """
         t = norm_simple(transcript) or ""
         kw = (keyword or "").strip().lower()
