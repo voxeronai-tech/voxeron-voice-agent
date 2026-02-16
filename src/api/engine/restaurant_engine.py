@@ -866,15 +866,23 @@ class RestaurantEngine:
                 bundle["naan_variant"] = max(1, int(naan_qty or 1))
             setattr(st, "pending_variant_bundle", bundle)
 
+            hint_lines: list[str] = []
+            if needs_biryani_variant:
+                opts = self._menu_options_for_keyword(getattr(st, "menu", None), "biryani", limit=5)
+                if opts:
+                    hint_lines.append(f"biryani: {', '.join(opts)}")
+            if needs_naan_variant:
+                opts = self._menu_options_for_keyword(getattr(st, "menu", None), "naan", limit=5)
+                if opts:
+                    hint_lines.append(f"naan: {', '.join(opts)}")
+
             stt_hint = (
                 "User is selecting missing variants. Return only the chosen option words.\n"
-                "Biryani: chicken, lamb, vegetable.\n"
-                "Naan: plain, garlic, keema, cheese, peshawari (or any naan option said)."
+                + ("\n".join(hint_lines) if hint_lines else "")
                 if lang != "nl"
                 else
                 "Gebruiker kiest ontbrekende varianten. Geef alleen de gekozen optie-woorden.\n"
-                "Biryani: kip, lam, vegetarisch.\n"
-                "Naan: plain, garlic, keema, cheese, peshawari (of een genoemde naan-optie)."
+                + ("\n".join(hint_lines) if hint_lines else "")
             )
 
             return ResponsePlan(
