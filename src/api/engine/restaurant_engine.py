@@ -61,13 +61,84 @@ class RestaurantEngine:
 
         return 1
 
-    def _top3_lamb(self, state: Any) -> List[str]:
-        ranked = ["Lamb Dhansak", "Lamb Biryani", "Lamb Korma"]
-        menu = getattr(state, "menu", None)
+    def _get_bestsellers(self, st: Any, limit: int = 3, category_hint: Optional[str] = None) -> List[str]:
+        """
+        Generic, menu-driven bestseller suggestions.
+        - Uses MenuSnapshot.items_by_id and MenuItem.tags (dict)
+        - No domain hardcoding
+        - Deterministic fallback: stable menu order
+        """
+        menu = getattr(st, "menu", None)
         if not menu:
-            return ranked
-        available = {menu.display_name(iid) for _n, iid in getattr(menu, "name_choices", [])}
-        return [x for x in ranked if x in available] or ranked
+            return []
+        items_by_id = getattr(menu, "items_by_id", None)
+        if not isinstance(items_by_id, dict) or not items_by_id:
+            return []
+
+        items = list(items_by_id.values())
+
+        # Optional coarse filter by category hint if the tenant encodes it in tags
+        if category_hint:
+            ch = category_hint.strip().lower()
+            if ch:
+                def _has_cat(it: Any) -> bool:
+                    tags = getattr(it, "tags", None) or {}
+                    if not isinstance(tags, dict):
+                        return False
+                    cat = tags.get("category")
+                    if isinstance(cat, str) and cat.strip().lower() == ch:
+                        return True
+                    cats = tags.get("categories")
+                    if isinstance(cats, list) and any(isinstance(x, str) and x.strip().lower() == ch for x in cats):
+                        return True
+                    return False
+
+                filtered = [it for it in items if _has_cat(it)]
+                if filtered:
+                    items = filtered
+
+        def _score(it: Any) -> tuple:
+            tags = getattr(it, "tags", None) or {}
+            if not isinstance(tags, dict):
+                tags = {}
+
+            bestseller_flag = 1 if tags.get("bestseller") or tags.get("popular") or tags.get("most_popular") else 0
+
+            pop = tags.get("popularity_score") or tags.get("popularity")
+            try:
+                pop_val = float(pop) if pop is not None else 0.0
+            except Exception:
+                pop_val = 0.0
+
+            rank = tags.get("sales_rank") or tags.get("rank")
+            try:
+                rank_val = int(rank) if rank is not None else 10**9
+            except Exception:
+                rank_val = 10**9
+
+            return (bestseller_flag, pop_val, -rank_val)
+
+        items_sorted = sorted(items, key=_score, reverse=True)
+
+        out: List[str] = []
+        for it in items_sorted:
+            name = (getattr(it, "name", None) or "").strip()
+            if not name or name in out:
+                continue
+            out.append(name)
+            if len(out) >= limit:
+                break
+
+        if not out:
+            for it in items:
+                name = (getattr(it, "name", None) or "").strip()
+                if not name or name in out:
+                    continue
+                out.append(name)
+                if len(out) >= limit:
+                    break
+
+        return out
 
     def _find_naan_item_id(self, menu: Any, variant: str) -> Optional[str]:
         """
@@ -521,22 +592,22 @@ class RestaurantEngine:
         t = f" {tnorm} "
 
         # ----------------------------------------------------------
-        # 1) Informational query example (keep your existing lamb helper)
+        # 1) Informational query example (generic, menu-driven)
         # ----------------------------------------------------------
-        if tnorm and "lamb" in tnorm and "menu" in tnorm and any(x in tnorm for x in ("dish", "dishes", "gerechten")):
-            top3 = self._top3_lamb(st)
-            items = ", ".join(top3)
-            msg = (
-                f"Even kijken. We hebben bijvoorbeeld {items}. Zegt een van deze u iets?"
-                if lang == "nl"
-                else (
-                    f"Let me check the menu for you. We have a few great lamb dishes like {items}. "
-                    "Do any of those sound good?"
+        if tnorm and ((" menu " in t) or (" kaart " in t)) and any(
+            x in tnorm for x in ("dish", "dishes", "gerechten", "recommend", "suggest", "popular", "bestseller", "top")
+        ):
+            picks = self._get_bestsellers(st, limit=3)
+            if picks:
+                items = ", ".join(picks)
+                msg = (
+                    f"Even kijken op de kaart. Populaire opties zijn {items}. Wat wil je?"
+                    if lang == "nl"
+                    else f"Let me check the menu for you. Popular options include {items}. What would you like?"
                 )
-            )
-            st.last_category = "lamb"
-            st.last_category_items = top3
-            return ResponsePlan(action=PlanAction.REPLY, reply=msg, lang=lang, debug={"reason": "top3_lamb"})
+            else:
+                msg = "Wat heb je in gedachten?" if lang == "nl" else "What are you in the mood for?"
+            return ResponsePlan(action=PlanAction.REPLY, reply=msg, lang=lang, debug={"reason": "menu_bestsellers"})
 
         # ----------------------------------------------------------
         # 2) Gate creation: VARIANT BUNDLE (Optima-style, max 2 asks)
