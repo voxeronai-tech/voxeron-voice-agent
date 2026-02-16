@@ -863,7 +863,7 @@ class RestaurantEngine:
             if needs_biryani_variant:
                 bundle["biryani_variant"] = max(1, int(biryani_qty or 1))
             if needs_naan_variant:
-                bundle["nan_variant"] = max(1, int(naan_qty or 1))
+                bundle["naan_variant"] = max(1, int(naan_qty or 1))
             setattr(st, "pending_variant_bundle", bundle)
 
             stt_hint = (
