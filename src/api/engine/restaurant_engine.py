@@ -568,6 +568,67 @@ class RestaurantEngine:
             debug={"reason": "variant_bundle_resolved", "added": resolved},
         )
     
+    def _variant_family_tokens_from_menu(self, menu: Any, min_items: int = 2) -> list[str]:
+        """
+        Generic heuristic: treat a token as a 'variant family' if it appears in >= min_items menu item names.
+        No domain words. Deterministic: stable sort.
+        """
+        if not menu or not getattr(menu, "name_choices", None):
+            return []
+
+        stop = {
+            "and", "or", "the", "a", "an", "of", "with",
+            "en", "of", "de", "het", "een", "met",
+        }
+
+        counts: dict[str, int] = {}
+        seen_by_token: dict[str, set[str]] = {}
+
+        for _n, iid in getattr(menu, "name_choices", []) or []:
+            dn = (menu.display_name(iid) or "").strip().lower()
+            if not dn:
+                continue
+            toks = [w for w in dn.split() if w and w not in stop and len(w) >= 3]
+            for w in set(toks):
+                counts[w] = counts.get(w, 0) + 1
+                s = seen_by_token.get(w)
+                if s is None:
+                    s = set()
+                    seen_by_token[w] = s
+                s.add(iid)
+
+        # Must appear in at least N distinct items
+        cands = [w for w, ids in seen_by_token.items() if len(ids) >= min_items]
+        return sorted(cands)
+
+    def _family_has_variant_signal(self, menu: Any, family: str, tnorm: str) -> bool:
+        """
+        If user already said any extra token that differentiates items within the family, treat as resolved.
+        """
+        if not menu or not family or not tnorm:
+            return False
+        t = f" {tnorm} "
+        fam = family.strip().lower()
+        if not fam:
+            return False
+
+        # gather tokens that occur in family items (excluding the family itself)
+        stop = {fam, "and", "or", "the", "a", "an", "of", "with", "en", "of", "de", "het", "een", "met"}
+        variant_tokens: set[str] = set()
+
+        for _n, iid in getattr(menu, "name_choices", []) or []:
+            dn = (menu.display_name(iid) or "").strip().lower()
+            if not dn:
+                continue
+            if fam not in dn.split():
+                continue
+            for w in dn.split():
+                if w and (w not in stop) and len(w) >= 3:
+                    variant_tokens.add(w)
+
+        # if transcript includes any variant token, assume user specified variant
+        return any((f" {w} " in t) for w in variant_tokens)
+
     def plan(self, state: Any, transcript: str) -> ResponsePlan:
         st = state
         t_raw = (transcript or "").strip()
@@ -618,81 +679,46 @@ class RestaurantEngine:
             return ResponsePlan(action=PlanAction.REPLY, reply=msg, lang=lang, debug={"reason": "menu_bestsellers"})
 
         # ----------------------------------------------------------
-        # 2) Gate creation: VARIANT BUNDLE (Optima-style, max 2 asks)
-        # If multiple items require a variant selection, ask up to 2 questions in one prompt.
-        # One gate must be able to resolve multiple answers from a single user utterance.
+        # 2) Gate creation: VARIANT BUNDLE (generic, menu-driven, max 2 asks)
+        # Heuristic until DB has explicit variant_family metadata:
+        # - detect "family tokens" that appear in multiple menu item names
+        # - if user mentions a family but not a differentiating token, ask
         # ----------------------------------------------------------
-        needs_biryani_variant = False
-        biryani_qty = 1
-        if " biryani " in t:
-            has_biryani_variant = any(
-                x in t
-                for x in (
-                    " chicken ", " lamb ", " vegetarian ", " veg ", " vegetarisch ",
-                    " mix ", " mushroom ", " prawn ", " king prawn ", " garnaal ",
-                    " tikka ",
-                )
-            )
-            if not has_biryani_variant:
-                needs_biryani_variant = True
-                biryani_qty = self._qty_near_keyword(transcript, "biryani")
+        menu = getattr(st, "menu", None)
+        families = self._variant_family_tokens_from_menu(menu, min_items=2)
 
-        needs_naan_variant = False
-        naan_qty = 1
-        if (" naan " in t) or (" nan " in t):
-            has_naan_variant = any(
-                x in t
-                for x in (
-                    " garlic ", " knoflook ",
-                    " cheese ", " kaas ",
-                    " keema ", " kheema ",
-                    " peshawari ",
-                    " plain ", " regular ", " normal ",
-                    " gewoon ", " normaal ", " standaard ",
-                )
-            )
-            if not has_naan_variant:
-                needs_naan_variant = True
-                naan_qty = max(self._qty_near_keyword(transcript, "naan"), self._qty_near_keyword(transcript, "nan"))
+        mentioned: list[str] = []
+        for fam in families:
+            if f" {fam} " in t:
+                mentioned.append(fam)
 
-        if needs_biryani_variant or needs_naan_variant:
-            # Build up to TWO questions per prompt
+        # Determine which mentioned families need clarification
+        needs: list[tuple[str, int]] = []  # (family, qty)
+        for fam in mentioned:
+            if self._family_has_variant_signal(menu, fam, tnorm):
+                continue
+            qty = self._qty_near_keyword(transcript, fam)
+            needs.append((fam, max(1, int(qty or 1))))
+
+        if needs:
+            needs = needs[:2]  # Optima pacing: max 2 asks
+
             questions: list[str] = []
-
-            if needs_biryani_variant:
-                questions.append(
-                    "Could you please tell me which type of biryani you would like? We have Chicken, Lamb, and Vegetable Biryani."
-                    if lang != "nl"
-                    else "Welke biryani wilt u? We hebben kip, lam, en vegetarisch."
-                )
-
-            if needs_naan_variant:
-                naan_q = self._ask_variant_from_menu(getattr(st, "menu", None), "naan", lang)
-                # Keep Optima pacing: second question prefixed with "Also,"
-                questions.append(
-                    ("Also, " + naan_q) if lang != "nl" else ("En, " + naan_q)
-                )
-
-            questions = questions[:2]
-            reply = " ".join([q.strip() for q in questions if q.strip()])
-
-            # Store bundle requirements on state (engine-owned)
             bundle: dict[str, int] = {}
-            if needs_biryani_variant:
-                bundle["biryani_variant"] = max(1, int(biryani_qty or 1))
-            if needs_naan_variant:
-                bundle["naan_variant"] = max(1, int(naan_qty or 1))
+
+            for fam, qty in needs:
+                questions.append(self._ask_variant_from_menu(menu, fam, lang))
+                bundle[f"{fam}_variant"] = qty
+
+            reply = self._join_variant_questions(questions, lang)
+
             setattr(st, "pending_variant_bundle", bundle)
 
             hint_lines: list[str] = []
-            if needs_biryani_variant:
-                opts = self._menu_options_for_keyword(getattr(st, "menu", None), "biryani", limit=5)
+            for fam, _qty in needs:
+                opts = self._menu_options_for_keyword(menu, fam, limit=5)
                 if opts:
-                    hint_lines.append(f"biryani: {', '.join(opts)}")
-            if needs_naan_variant:
-                opts = self._menu_options_for_keyword(getattr(st, "menu", None), "naan", limit=5)
-                if opts:
-                    hint_lines.append(f"naan: {', '.join(opts)}")
+                    hint_lines.append(f"{fam}: {', '.join(opts)}")
 
             stt_hint = (
                 "User is selecting missing variants. Return only the chosen option words.\n"
