@@ -778,10 +778,6 @@ class RestaurantEngine:
         if resolved is not None:
             return resolved
 
-        resolved = self._resolve_pending_nan_variant(st, transcript)
-        if resolved is not None:
-            return resolved
-
         tnorm = norm_simple(transcript) or ""
         t = f" {tnorm} "
 
