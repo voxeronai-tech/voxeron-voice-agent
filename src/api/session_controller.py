@@ -1183,12 +1183,15 @@ class SessionController:
                         added_any = True
                         added_ids.append(item_id)
 
-                    st.pending_choice = "nan_variant"
-                    st.pending_qty = max(1, int(effective_qty or 1))
-                    st.nan_prompt_count = 0
+                    # Open a generic variant bundle gate (engine-owned resolution)
+                    st.pending_choice = "variant_bundle"
+                    st.pending_qty = 1
+                    st.pending_variant_bundle = {"naan_variant": max(1, int(effective_qty or 1))}
 
                     await self.clear_thinking(ws)
-                    await self._speak(ws, self._naan_optima_prompt(list_mode="short", with_main="Butter Chicken" if "butter chicken" in norm_simple(transcript) else None))
+
+                    # Ask generically, let RestaurantEngine derive options from menu (no domain leakage here)
+                    await self._speak(ws, "Which option would you like?" if (getattr(st, "lang", "en") != "nl") else "Welke optie wil je?")
                     return
 
                 if mentions_nan and has_variant:
