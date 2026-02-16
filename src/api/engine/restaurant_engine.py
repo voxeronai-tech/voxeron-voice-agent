@@ -387,6 +387,186 @@ class RestaurantEngine:
             pending_qty=qty,
             debug={"reason": "biryani_variant_resolved", "variant": pick, "added": bool(iid), "qty": qty},
         )
+    def _resolve_pending_variant_bundle(self, st: Any, transcript: str) -> ResponsePlan | None:
+        choice = "variant_bundle"
+        if self._pending_head(st) != choice:
+            return None
+
+        lang = getattr(st, "lang", "en") or "en"
+        menu = getattr(st, "menu", None)
+        bundle = getattr(st, "pending_variant_bundle", None)
+
+        tnorm = norm_simple(transcript) or ""
+        t = f" {tnorm} "
+
+        # Cancel intent clears the whole bundle gate
+        if self._is_cancel_intent(t):
+            setattr(st, "pending_variant_bundle", None)
+            self._clear_pending_gate(st, choice)
+            return ResponsePlan(
+                action=PlanAction.UPDATE_CART,
+                reply="",
+                lang=lang,
+                pending_choice=None,
+                pending_qty=1,
+                consumed=True,
+                debug={"reason": "variant_bundle_cancelled"},
+            )
+
+        if not menu or not getattr(menu, "items_by_id", None) or not isinstance(bundle, dict) or not bundle:
+            # Nothing usable, clear gate safely
+            setattr(st, "pending_variant_bundle", None)
+            self._clear_pending_gate(st, choice)
+            return ResponsePlan(
+                action=PlanAction.UPDATE_CART,
+                reply="",
+                lang=lang,
+                pending_choice=None,
+                pending_qty=1,
+                consumed=True,
+                debug={"reason": "variant_bundle_cleared_no_menu_or_bundle"},
+            )
+
+        # Helper: pick best matching item_id for a given family token
+        def _pick_item_id_for_family(fam: str) -> Optional[str]:
+            fam_n = norm_simple(fam) or ""
+            if not fam_n:
+                return None
+
+            # Candidate set: menu items whose normalized name contains the family token
+            candidates: list[str] = []
+            for name_norm, iid in getattr(menu, "name_choices", []) or []:
+                if fam_n in (name_norm or ""):
+                    candidates.append(iid)
+
+            cand_set = set(candidates)
+
+            # 1) Alias-map hit (prefer longest match) and prefer candidates if available
+            best_alias = ""
+            best_iid: Optional[str] = None
+            amap = getattr(menu, "alias_map", None) or {}
+            if isinstance(amap, dict):
+                for alias_norm, iid in amap.items():
+                    if not alias_norm:
+                        continue
+                    if f" {alias_norm} " in t:
+                        if cand_set and iid not in cand_set:
+                            continue
+                        if len(alias_norm) > len(best_alias):
+                            best_alias = alias_norm
+                            best_iid = iid
+            if best_iid:
+                return best_iid
+
+            # 2) Token overlap among candidates (or whole menu if no candidates)
+            stop = {
+                "the", "a", "an", "please", "pls", "i", "want", "would", "like",
+                "do", "you", "have", "on", "menu", "which", "wat", "welke",
+                "een", "de", "het", "ik", "wil", "graag",
+            }
+            toks = [w for w in tnorm.split() if w and w not in stop]
+            if not toks:
+                return None
+
+            search_ids = candidates if candidates else [iid for _n, iid in getattr(menu, "name_choices", []) or []]
+
+            best_score = 0
+            best_id2: Optional[str] = None
+            for iid in search_ids:
+                dn = (menu.display_name(iid) or "").strip().lower()
+                if not dn:
+                    continue
+                name_toks = [w for w in dn.split() if w and w not in stop]
+                if not name_toks:
+                    continue
+                overlap = len(set(toks).intersection(set(name_toks)))
+                if overlap > best_score:
+                    best_score = overlap
+                    best_id2 = iid
+
+            return best_id2 if best_score > 0 else None
+
+        resolved: dict[str, dict[str, Any]] = {}
+        unresolved: list[str] = []
+
+        # bundle currently maps bundle_key -> qty (legacy)
+        # Derive family token from key by stripping _variant (generic, no food hardcoding)
+        for key, qty in bundle.items():
+            fam = str(key)
+            if fam.endswith("_variant"):
+                fam = fam[: -len("_variant")]
+            fam = fam.strip()
+            q = max(1, int(qty or 1))
+
+            iid = _pick_item_id_for_family(fam)
+            if iid:
+                resolved[key] = {"family": fam, "qty": q, "item_id": iid, "name": menu.display_name(iid)}
+            else:
+                unresolved.append(key)
+
+        # If anything unresolved, re-ask up to 2 (Optima pacing) using menu-driven prompts
+        if unresolved:
+            # ask for the first two unresolved families
+            qs: list[str] = []
+            asked: list[str] = []
+            for k in unresolved[:2]:
+                fam = k[:-len("_variant")] if str(k).endswith("_variant") else str(k)
+                asked.append(fam)
+                qs.append(self._ask_variant_from_menu(menu, fam, lang))
+
+            reply = self._join_variant_questions(qs, lang)
+
+            # Dynamic STT hint from options for the asked families
+            hint_lines: list[str] = []
+            for fam in asked:
+                opts = self._menu_options_for_keyword(menu, fam, limit=5)
+                if opts:
+                    hint_lines.append(f"{fam}: {', '.join(opts)}")
+
+            stt_hint = (
+                "User is selecting missing variants. Return only the chosen option words.\n"
+                + ("\n".join(hint_lines) if hint_lines else "")
+                if lang != "nl"
+                else
+                "Gebruiker kiest ontbrekende varianten. Geef alleen de gekozen optie-woorden.\n"
+                + ("\n".join(hint_lines) if hint_lines else "")
+            )
+
+            return ResponsePlan(
+                action=PlanAction.CLARIFY,
+                reply=("Certainly. " + reply) if lang != "nl" else ("Zeker. " + reply),
+                lang=lang,
+                pending_choice=choice,
+                pending_qty=1,
+                stt_hint=stt_hint,
+                consumed=True,
+                debug={"reason": "variant_bundle_not_fully_resolved", "resolved": resolved, "unresolved": unresolved},
+            )
+
+        # Apply resolved items to order deterministically
+        order = getattr(st, "order", None)
+        if not isinstance(order, dict):
+            order = {}
+            setattr(st, "order", order)
+
+        for _k, info in resolved.items():
+            iid = info["item_id"]
+            q = int(info["qty"])
+            order[iid] = int(order.get(iid, 0) or 0) + q
+
+        # Clear bundle + gate
+        setattr(st, "pending_variant_bundle", None)
+        self._clear_pending_gate(st, choice)
+
+        return ResponsePlan(
+            action=PlanAction.UPDATE_CART,
+            reply="",
+            lang=lang,
+            pending_choice=None,
+            pending_qty=1,
+            consumed=True,
+            debug={"reason": "variant_bundle_resolved", "added": resolved},
+        )
 
     def _resolve_pending_nan_variant(self, st: Any, transcript: str) -> ResponsePlan | None:
         choice = "nan_variant"
@@ -580,6 +760,10 @@ class RestaurantEngine:
         # ----------------------------------------------------------
         # 0) Resolve pending gates FIRST
         # ----------------------------------------------------------
+        resolved = self._resolve_pending_variant_bundle(st, transcript)
+        if resolved is not None:
+            return resolved
+        
         resolved = self._resolve_pending_biryani_variant(st, transcript)
         if resolved is not None:
             return resolved
