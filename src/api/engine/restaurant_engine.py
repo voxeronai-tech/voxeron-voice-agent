@@ -152,7 +152,7 @@ class RestaurantEngine:
                 continue
             dn_l = dn.lower()
 
-            # match keyword (e.g., "naan"/"nan")
+            # match keyword token in display name
             if kw not in dn_l:
                 continue
 
