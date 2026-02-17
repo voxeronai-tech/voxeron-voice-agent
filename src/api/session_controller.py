@@ -1050,9 +1050,9 @@ class SessionController:
             if _looks_like_stt_prompt_dump(transcript):
                 await self.clear_thinking(ws)
                 msg = (
-                    "Begrepen. Zeg gewoon wat je wilt bestellen, bijvoorbeeld: ‘twee butter chicken en één naan’."
+                    "Begrepen. Zeg gewoon wat je wilt bestellen, bijvoorbeeld: ‘twee items en één extra’."
                     if st.lang == "nl"
-                    else "Got it. Just tell me what you'd like to order, for example: ‘two butter chicken and one naan’."
+                    else "Got it. Just tell me what you'd like to order, for example: ‘two items and one extra’."
                 )
                 await self._speak(ws, msg)
                 return
@@ -1161,49 +1161,7 @@ class SessionController:
                 orch_item_id = self._maybe_orchestrator_match_item(st.menu, transcript, int(effective_qty or 1))
                 adds = [] if orch_item_id else parse_add_item(st.menu, transcript, qty=effective_qty)
 
-                mentions_nan = (" naan " in (" " + norm_simple(transcript) + " ")) or detect_generic_nan_request(transcript)
-                variant = _extract_nan_variant_keyword_scoped(transcript)
-                has_variant = bool(variant)
-
-                naan_opts = self._naan_options_from_menu(st.menu)
-                logger.info(
-                    "naan_check mentions_nan=%s has_variant=%s variant=%s naan_opts=%d opts=%s",
-                    mentions_nan, has_variant, variant, len(naan_opts), [x[0] for x in naan_opts[:5]],
-                )
-
-                if mentions_nan and (not has_variant):
-                    non_nan_hits: List[Tuple[str, int]] = []
-                    for item_id, qty in adds:
-                        if not self._is_nan_item(st.menu, item_id):
-                            non_nan_hits.append((item_id, qty))
-
-                    for item_id, qty in non_nan_hits:
-                        st.order.add(item_id, qty)
-                        added_any = True
-                        added_ids.append(item_id)
-
-                    # Open a generic variant bundle gate (engine-owned resolution)
-                    st.pending_choice = "variant_bundle"
-                    st.pending_qty = 1
-                    st.pending_variant_bundle = {"naan_variant": max(1, int(effective_qty or 1))}
-
-                    await self.clear_thinking(ws)
-
-                    # Ask generically, let RestaurantEngine derive options from menu (no domain leakage here)
-                    await self._speak(ws, "Which option would you like?" if (getattr(st, "lang", "en") != "nl") else "Welke optie wil je?")
-                    return
-
-                if mentions_nan and has_variant:
-                    iid = self._find_naan_item_for_variant(st.menu, variant or "")
-                    if iid:
-                        st.order.add(iid, max(1, int(effective_qty or 1)))
-                        added_any = True
-                        added_ids.append(iid)
-                        adds = [(x, q) for (x, q) in adds if x != iid and not self._is_nan_item(st.menu, x)]
-
                 for item_id, qty in adds:
-                    if mentions_nan and has_variant and self._is_nan_item(st.menu, item_id):
-                        continue
                     st.order.add(item_id, qty)
                     added_any = True
                     added_ids.append(item_id)
