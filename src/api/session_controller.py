@@ -968,7 +968,7 @@ class SessionController:
                 return
 
             # ==========================================================
-            # 6) Ordering logic (Deterministic add + menu item scoping)
+            # 6) Ordering logic (Deterministic add + engine-driven variant gates)
             # ==========================================================
             add_qty = (_extract_qty_first(transcript, "en") or _extract_qty_first(transcript, "nl") or 1)
             effective_qty = add_qty
