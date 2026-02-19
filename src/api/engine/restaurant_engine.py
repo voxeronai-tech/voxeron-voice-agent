@@ -435,36 +435,40 @@ class RestaurantEngine:
     
     def _variant_family_tokens_from_menu(self, menu: Any, min_items: int = 2) -> list[str]:
         """
-        Generic heuristic: treat a token as a 'variant family' if it appears in >= min_items menu item names.
-        No domain words. Deterministic: stable sort.
+        Structural heuristic:
+        - Treat the LAST meaningful token of an item name as the family token.
+        - If that family token appears in >= min_items distinct items, it is a variant family.
+        Deterministic. No domain hardcoding.
         """
         if not menu or not getattr(menu, "name_choices", None):
             return []
 
         stop = {
             "and", "or", "the", "a", "an", "of", "with",
-            "en", "of", "de", "het", "een", "met",
+            "en", "de", "het", "een", "met",
         }
 
-        counts: dict[str, int] = {}
-        seen_by_token: dict[str, set[str]] = {}
+        family_to_ids: dict[str, set[str]] = {}
 
         for _n, iid in getattr(menu, "name_choices", []) or []:
             dn = (menu.display_name(iid) or "").strip().lower()
             if not dn:
                 continue
-            toks = [w for w in dn.split() if w and w not in stop and len(w) >= 3]
-            for w in set(toks):
-                counts[w] = counts.get(w, 0) + 1
-                s = seen_by_token.get(w)
-                if s is None:
-                    s = set()
-                    seen_by_token[w] = s
-                s.add(iid)
 
-        # Must appear in at least N distinct items
-        cands = [w for w, ids in seen_by_token.items() if len(ids) >= min_items]
-        return sorted(cands)
+            toks = [w for w in dn.split() if w and w not in stop and len(w) >= 3 and w.isalpha()]
+            if not toks:
+                continue
+
+            family = toks[-1]  # last token = base dish / family
+
+            s = family_to_ids.get(family)
+            if s is None:
+                s = set()
+                family_to_ids[family] = s
+            s.add(iid)
+
+        fams = [fam for fam, ids in family_to_ids.items() if len(ids) >= int(min_items or 2)]
+        return sorted(fams)
 
     def _family_has_variant_signal(self, menu: Any, family: str, tnorm: str) -> bool:
         """
@@ -516,6 +520,59 @@ class RestaurantEngine:
                     return True
 
         return False
+
+    def _family_for_item_id(self, menu: Any, iid: str) -> str | None:
+        """
+        Infer family token for an item using the same rule as _variant_family_tokens_from_menu:
+        last meaningful token of display name.
+        """
+        if not menu or not iid:
+            return None
+        dn = (menu.display_name(iid) or "").strip().lower()
+        if not dn:
+            return None
+
+        stop = {
+            "and", "or", "the", "a", "an", "of", "with",
+            "en", "de", "het", "een", "met",
+        }
+        toks = [w for w in dn.split() if w and w not in stop and len(w) >= 3 and w.isalpha()]
+        return toks[-1] if toks else None
+
+
+    def _mentioned_families(self, menu: Any, families: list[str], tnorm: str) -> list[str]:
+        """
+        Determine which family tokens are mentioned in the transcript:
+        - direct token hit: " biryani "
+        - alias_map hit: if an alias maps to an item whose family token is in families
+        Deterministic: preserve `families` order.
+        """
+        if not menu or not families or not tnorm:
+            return []
+
+        t = f" {tnorm} "
+        fam_set = set(families)
+        mentioned_set: set[str] = set()
+
+        # 1) direct family token match
+        for fam in families:
+            if f" {fam} " in t:
+                mentioned_set.add(fam)
+
+        # 2) alias_map match -> map iid -> family token
+        amap = getattr(menu, "alias_map", None) or {}
+        if isinstance(amap, dict) and amap:
+            for alias_norm, iid in amap.items():
+                if not alias_norm or not iid:
+                    continue
+                if f" {alias_norm} " not in t:
+                    continue
+                fam = self._family_for_item_id(menu, iid)
+                if fam and fam in fam_set:
+                    mentioned_set.add(fam)
+
+        # stable output
+        return [fam for fam in families if fam in mentioned_set]
 
     def plan(self, state: Any, transcript: str) -> ResponsePlan:
         st = state
@@ -575,10 +632,7 @@ class RestaurantEngine:
         menu = getattr(st, "menu", None)
         families = self._variant_family_tokens_from_menu(menu, min_items=2)
 
-        mentioned: list[str] = []
-        for fam in families:
-            if f" {fam} " in t:
-                mentioned.append(fam)
+        mentioned = self._mentioned_families(menu, families, tnorm)
 
         # Determine which mentioned families need clarification
         needs: list[tuple[str, int]] = []  # (family, qty)
