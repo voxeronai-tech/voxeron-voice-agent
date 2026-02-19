@@ -468,31 +468,54 @@ class RestaurantEngine:
 
     def _family_has_variant_signal(self, menu: Any, family: str, tnorm: str) -> bool:
         """
-        If user already said any extra token that differentiates items within the family, treat as resolved.
+        Detect if user specified a differentiating token for a given family.
+        Only consider tokens within a small window around the family keyword.
+        Prevents cross-item contamination.
         """
         if not menu or not family or not tnorm:
             return False
-        t = f" {tnorm} "
+
         fam = family.strip().lower()
         if not fam:
             return False
 
-        # gather tokens that occur in family items (excluding the family itself)
-        stop = {fam, "and", "or", "the", "a", "an", "of", "with", "en", "of", "de", "het", "een", "met"}
+        tokens = tnorm.split()
+        if not tokens:
+            return False
+
+        # Collect differentiating tokens from menu items in this family
+        stop = {
+            fam, "and", "or", "the", "a", "an", "of", "with",
+            "en", "de", "het", "een", "met"
+        }
+
         variant_tokens: set[str] = set()
 
         for _n, iid in getattr(menu, "name_choices", []) or []:
             dn = (menu.display_name(iid) or "").strip().lower()
             if not dn:
                 continue
-            if fam not in dn.split():
+            parts = dn.split()
+            if fam not in parts:
                 continue
-            for w in dn.split():
+            for w in parts:
                 if w and (w not in stop) and len(w) >= 3:
                     variant_tokens.add(w)
 
-        # if transcript includes any variant token, assume user specified variant
-        return any((f" {w} " in t) for w in variant_tokens)
+        if not variant_tokens:
+            return False
+
+        window_radius = 2
+
+        for i, tok in enumerate(tokens):
+            if tok == fam:
+                lo = max(0, i - window_radius)
+                hi = min(len(tokens), i + window_radius + 1)
+                window = tokens[lo:hi]
+                if any(w in variant_tokens for w in window):
+                    return True
+
+        return False
 
     def plan(self, state: Any, transcript: str) -> ResponsePlan:
         st = state
