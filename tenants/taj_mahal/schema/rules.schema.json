@@ -5,11 +5,19 @@
   "properties": {
     "silence_end_ms": { "type": "integer", "minimum": 100, "maximum": 5000 },
     "min_utterance_ms": { "type": "integer", "minimum": 200, "maximum": 5000 },
+
     "upsell": {
       "type": "object",
+      "description": "Upsell configuration for this tenant.",
       "properties": {
         "enable": { "type": "boolean" },
+        "enabled": { "type": "boolean" },
         "never_suggest_if_in_cart": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "avoid_if_already_in_order": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 },
           "uniqueItems": true
@@ -17,14 +25,58 @@
       },
       "additionalProperties": true
     },
+
+    "heartbeat": {
+      "type": "object",
+      "description": "Idle-time prompts and idle timeout behavior.",
+      "properties": {
+        "idle_seconds": { "type": "integer", "minimum": 5, "maximum": 600 },
+        "en": { "type": "string" },
+        "nl": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+
     "category_aliases": {
       "type": "object",
-      "description": "Optional: map category keys -> list of trigger words",
+      "description": "Optional: map category keys -> list of trigger words.",
       "additionalProperties": {
         "type": "array",
         "items": { "type": "string", "minLength": 1 },
         "uniqueItems": true
       }
+    },
+
+    "ontology": {
+      "type": "object",
+      "description": "Tenant-specific ontology overrides (bridge until DB-backed metadata exists).",
+      "properties": {
+        "families": {
+          "type": "object",
+          "description": "Map of opaque family_id -> family definition.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "requires_variant": {
+                "type": "boolean",
+                "default": true,
+                "description": "If true, ordering this family requires a follow-up variant selection."
+              },
+              "aliases": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 },
+                "uniqueItems": true,
+                "description": "Transcript tokens/phrases that indicate this family."
+              }
+            },
+            "required": ["aliases"],
+            "additionalProperties": true
+          }
+        }
+      },
+      "required": ["families"],
+      "additionalProperties": true
     }
   },
   "additionalProperties": true
