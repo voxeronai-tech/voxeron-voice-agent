@@ -7,5 +7,17 @@
     "idle_seconds": 25,
     "en": "Take your time. What would you like to order next?",
     "nl": "Neem je tijd - wat wil je hierna bestellen?"
+  },
+  "ontology": {
+    "families": {
+      "fam_biryani": {
+        "requires_variant": true,
+        "aliases": ["biryani"]
+      },
+      "fam_nan": {
+        "requires_variant": true,
+        "aliases": ["naan", "nan"]
+      }
+    }
   }
 }
