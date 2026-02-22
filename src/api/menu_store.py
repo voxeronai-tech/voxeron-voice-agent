@@ -52,10 +52,60 @@ class MenuSnapshot:
     name_choices: List[Tuple[str, str]] = field(default_factory=list)  # (norm_name, item_id)
     alias_map: Dict[str, str] = field(default_factory=dict)           # norm_alias -> item_id
 
+    # Tenant ontology overrides (bridge until DB metadata exists)
+    ontology_families: Dict[str, Any] = field(default_factory=dict)          # family_id -> def
+    ontology_alias_to_family: Dict[str, str] = field(default_factory=dict)   # alias_norm -> family_id
+
+    def family_label(self, family_id: str) -> str:
+        fam = (self.ontology_families or {}).get(family_id) or {}
+        aliases = fam.get("aliases") if isinstance(fam, dict) else None
+        if isinstance(aliases, list) and aliases:
+            a0 = str(aliases[0] or "").strip()
+            return a0 or family_id
+        return family_id
+
+    def family_requires_variant(self, family_id: str) -> bool:
+        fam = (self.ontology_families or {}).get(family_id) or {}
+        if isinstance(fam, dict):
+            rv = fam.get("requires_variant")
+            return True if rv is None else bool(rv)
+        return True
+
+    def detect_family_mentions(self, transcript: str) -> List[str]:
+        """
+        Detect family mentions using tenant ontology aliases.
+        Returns opaque family_ids in deterministic order of appearance.
+        Longest-alias wins, no domain hardcoding.
+        """
+        tnorm = norm_text(transcript or "")
+        if not tnorm:
+            return []
+        amap = self.ontology_alias_to_family or {}
+        if not amap:
+            return []
+
+        t = f" {tnorm} "
+        # longest match first to avoid "nan" stealing "naan", etc.
+        pairs = sorted(amap.items(), key=lambda kv: len(kv[0] or ""), reverse=True)
+
+        hits: List[tuple[int, str]] = []  # (pos, family_id)
+        seen: set[str] = set()
+
+        for alias_norm, fam_id in pairs:
+            if not alias_norm or not fam_id:
+                continue
+            needle = f" {alias_norm} "
+            pos = t.find(needle)
+            if pos >= 0 and fam_id not in seen:
+                seen.add(fam_id)
+                hits.append((pos, fam_id))
+
+        hits.sort(key=lambda x: x[0])
+        return [fid for _pos, fid in hits]
+
     def display_name(self, item_id: str) -> str:
         it = self.items_by_id.get(item_id)
         return it.name if it else item_id
-
 
 class MenuStore:
     """
@@ -77,18 +127,68 @@ class MenuStore:
             os.environ["DATABASE_URL"] = database_url
 
     async def start(self) -> None:
-        # Ensure pool is up
         await db.connect()
 
     async def close(self) -> None:
         await db.close()
 
-    async def get_snapshot(self, tenant_ref: str, lang: str = "en") -> Optional[MenuSnapshot]:
+    # -----------------------------
+    # Ontology helpers (bridge phase)
+    # -----------------------------
+
+    def _build_family_alias_map(self, families: dict) -> Dict[str, str]:
+        """
+        Build alias_norm -> family_id map from rules.json ontology.
+        Deterministic conflict handling: first-seen alias wins.
+        """
+        out: Dict[str, str] = {}
+        if not isinstance(families, dict):
+            return out
+
+        for fam_id, fam_def in families.items():
+            if not fam_id or not isinstance(fam_def, dict):
+                continue
+            aliases = fam_def.get("aliases")
+            if not isinstance(aliases, list):
+                continue
+            for a in aliases:
+                a_norm = norm_text(str(a or ""))
+                if not a_norm:
+                    continue
+                out.setdefault(a_norm, str(fam_id))
+        return out
+
+    def _apply_rules_ontology(self, snap: MenuSnapshot, rules: Optional[dict]) -> None:
+        """
+        Attach tenant ontology overrides onto an existing MenuSnapshot.
+        Safe to call repeatedly, last call wins.
+        """
+        rules_obj: dict = rules if isinstance(rules, dict) else {}
+        onto = rules_obj.get("ontology") if isinstance(rules_obj.get("ontology"), dict) else {}
+        fams = onto.get("families") if isinstance(onto.get("families"), dict) else {}
+
+        snap.ontology_families = fams
+        snap.ontology_alias_to_family = self._build_family_alias_map(fams)
+
+    # -----------------------------
+    # Snapshot
+    # -----------------------------
+
+    async def get_snapshot(
+        self,
+        tenant_ref: str,
+        lang: str = "en",
+        *,
+        rules: Optional[dict] = None,
+    ) -> Optional[MenuSnapshot]:
         now = time.time()
-        cache_key = (tenant_ref, lang)
+        cache_key = (tenant_ref, (lang or "en").lower())
+
         cached = self._cache.get(cache_key)
         if cached and (now - cached[0]) < self.ttl_seconds:
-            return cached[1]
+            snap = cached[1]
+            self._apply_rules_ontology(snap, rules)
+            return snap
 
         await db.connect()
         assert db.pool is not None
@@ -110,6 +210,9 @@ class MenuStore:
                 tenant_name=str(tenant["name"]),
                 default_language=str(tenant.get("default_language") or "english"),
             )
+
+            # Attach ontology (from rules.json) AFTER snap exists
+            self._apply_rules_ontology(snap, rules)
 
             # pick language columns
             lang_n = (lang or "en").lower()
@@ -140,6 +243,9 @@ class MenuStore:
             )
 
             def _set_alias(alias_norm: str, item_id: str, item_name_norm: str) -> None:
+                """
+                Alias map is for concrete item_ids only. Family aliases live in ontology_alias_to_family.
+                """
                 if not alias_norm or len(alias_norm) < 3:
                     return
 
@@ -184,22 +290,13 @@ class MenuStore:
                 # name itself is an alias
                 _set_alias(name_norm, item_id, name_norm)
 
-                # optional search keywords (DB columns exist)
-                kw = ""
-                if lang_n == "nl":
-                    kw = (r.get("search_keywords_nl") or "")
-                else:
-                    kw = (r.get("search_keywords_en") or "")
-
-                # BUT: your SELECT above doesn't include search_keywords_* (kept light).
-                # If you want them, add them to SELECT and this will work.
-                # We'll still support tags.keywords for now:
-
-                kws = (tags.get("keywords") or "")
+                # tags.keywords (comma or newline separated)
+                kws = tags.get("keywords") or ""
                 if isinstance(kws, str) and kws.strip():
                     for part in kws.replace("\n", ",").split(","):
                         _set_alias(norm_text(part), item_id, name_norm)
 
+                # tags.aliases (list)
                 aliases = tags.get("aliases")
                 if isinstance(aliases, list):
                     for a in aliases[:30]:

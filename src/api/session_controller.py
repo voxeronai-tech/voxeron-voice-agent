@@ -582,7 +582,16 @@ class SessionController:
 
         snap: Optional[MenuSnapshot] = None
         if self.menu_store:
-            snap = await self.menu_store.get_snapshot(tenant_ref, lang="en")
+            rules = {}
+            cfg = getattr(self.state, "tenant_cfg", None)
+            if cfg and getattr(cfg, "rules", None):
+                rules = cfg.rules or {}
+
+            snap = await self.menu_store.get_snapshot(
+                tenant_ref,
+                lang=(getattr(self.state, "lang", None) or "en"),
+                rules=rules,
+            )
         st.menu = snap
         if snap:
             st.tenant_id = snap.tenant_id

@@ -364,7 +364,15 @@ async def _handle_ws(ws: WebSocket) -> None:
     snap: Optional[MenuSnapshot] = None
     try:
         if (not is_dispatcher) and menu_store:
-            snap = await menu_store.get_snapshot(state.tenant_ref, lang="en")
+            rules = {}
+            if state.tenant_cfg and getattr(state.tenant_cfg, "rules", None):
+                rules = state.tenant_cfg.rules or {}
+
+            snap = await menu_store.get_snapshot(
+                state.tenant_ref,
+                lang=(state.lang or "en"),
+                rules=rules,
+            )
             if snap:
                 state.tenant_id = snap.tenant_id
                 state.tenant_name = snap.tenant_name
